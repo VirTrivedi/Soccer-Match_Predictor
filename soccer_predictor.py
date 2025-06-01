@@ -62,6 +62,31 @@ def get_match_outcome(match_data, team_id_of_interest):
     # If none of the above conditions matched, return None
     return None 
 
+def get_outcome_from_scoreline(scoreline_str):
+    """Converts a 'H-A' scoreline string to 'WIN', 'LOSS', or 'DRAW' for the home team."""
+    try:
+        if pd.isna(scoreline_str) or not isinstance(scoreline_str, str) or '-' not in scoreline_str:
+            return "UNKNOWN" 
+        
+        parts = scoreline_str.split('-', 1)
+        if len(parts) != 2:
+            return "UNKNOWN"
+            
+        home_score_str, away_score_str = parts
+        home_score = int(home_score_str)
+        away_score = int(away_score_str)
+
+        if home_score > away_score:
+            return "WIN"
+        elif home_score < away_score:
+            return "LOSS"
+        else:
+            return "DRAW"
+    except ValueError:
+        return "UNKNOWN"
+    except Exception:
+        return "UNKNOWN"
+
 def calculate_h2h_features(h2h_matches: list, perspective_home_team_id: int, perspective_away_team_id: int):
     """
     Calculates head-to-head features from the perspective of perspective_home_team_id.
@@ -162,14 +187,6 @@ def calculate_form_features(team_matches: list, team_id: int, num_games: int = 5
 def generate_score_grid_probabilities(model_classes, probabilities_array):
     '''
     Generates a 6x6 grid of score probabilities.
-
-    Args:
-        model_classes (list): List of class labels from the model (e.g., ['0-0', '1-0', ...]).
-        probabilities_array (np.array): Array of probabilities corresponding to model_classes.
-
-    Returns:
-        np.array: A 6x6 numpy array where grid[h][a] is the probability of score h-a.
-                  Returns None if inputs are invalid.
     '''
     if not isinstance(model_classes, list) or not isinstance(probabilities_array, np.ndarray):
         print("Warning: Invalid input types for generate_score_grid_probabilities.")
@@ -178,12 +195,11 @@ def generate_score_grid_probabilities(model_classes, probabilities_array):
         print("Warning: model_classes and probabilities_array length mismatch.")
         return None
 
-    score_grid = np.zeros((6, 6)) # Home scores 0-5 (rows), Away scores 0-5 (cols)
+    score_grid = np.zeros((6, 6))
 
     for i, class_label in enumerate(model_classes):
         try:
             if not isinstance(class_label, str) or '-' not in class_label:
-                # print(f"Warning: Skipping class_label '{class_label}' as it's not a valid scoreline string.")
                 continue
 
             parts = class_label.split('-')
@@ -194,14 +210,10 @@ def generate_score_grid_probabilities(model_classes, probabilities_array):
 
             if 0 <= home_score <= 5 and 0 <= away_score <= 5:
                 score_grid[home_score][away_score] = probabilities_array[i]
-            # else:
-                # print(f"Warning: Score {class_label} is outside the 0-5 grid.")
 
         except ValueError:
-            # print(f"Warning: Could not parse score from class_label '{class_label}'.")
             continue
         except Exception as e:
-            # print(f"An unexpected error occurred while processing class_label '{class_label}': {e}")
             continue
             
     return score_grid
@@ -421,7 +433,6 @@ def main():
 
     try:
         probabilities = model.predict_proba(upcoming_features_df)
-        # class_labels = {0: f"{home_team_name} (Home) Win", 1: "Draw", 2: f"{away_team_name} (Away) Win"} # Remove/comment
         print("\n--- Predicted Scoreline Probabilities (Top 5) ---")
         if hasattr(model, 'classes_') and probabilities.shape[1] == len(model.classes_):
             # Create a list of (scoreline, probability) tuples
@@ -429,29 +440,27 @@ def main():
             for i, class_label in enumerate(model.classes_):
                 score_probabilities.append((class_label, probabilities[0][i]))
             
-            # Sort by probability in descending order
             sorted_score_probabilities = sorted(score_probabilities, key=lambda item: item[1], reverse=True)
             
-            # Print the top 5
+            # Print the top 5 predicted scorelines with probabilities
             for i in range(min(5, len(sorted_score_probabilities))):
                 label, prob = sorted_score_probabilities[i]
                 print(f"  Score {label}: {prob:.2%}")
         else:
             print("Could not display score probabilities (model.classes_ or probabilities mismatch).")
 
-        score_grid = None # Initialize
+        score_grid = None
         if hasattr(model, 'classes_') and probabilities.shape[1] == len(model.classes_):
             score_grid = generate_score_grid_probabilities(list(model.classes_), probabilities[0])
 
         if score_grid is not None:
             print("\n--- Predicted Score Grid (Home on Left, Away on Top) ---")
-            # Header for away scores
             header = "Away->|  0  |  1  |  2  |  3  |  4  |  5  |"
             print(header)
             print("-" * len(header))
-            for i in range(6): # Home scores 0-5
+            for i in range(6):
                 row_str = f"Home {i} |"
-                for j in range(6): # Away scores 0-5
+                for j in range(6):
                     row_str += f" {score_grid[i][j]:.2%} |"
                 print(row_str)
                 print("-" * len(header))
@@ -461,13 +470,13 @@ def main():
             draw_prob_grid = 0
             away_win_prob_grid = 0
             
-            for r in range(6): # home_goals
-                for c in range(6): # away_goals
+            for r in range(6):
+                for c in range(6):
                     if r > c:
                         home_win_prob_grid += score_grid[r][c]
                     elif r == c:
                         draw_prob_grid += score_grid[r][c]
-                    else: # r < c
+                    else:
                         away_win_prob_grid += score_grid[r][c]
             
             print("\n--- Overall Outcome Probabilities (derived from score grid) ---")
@@ -481,17 +490,57 @@ def main():
         if not X_test.empty and not y_test.empty:
             print("\n--- Model Evaluation on Test Set ---")
             y_pred_test = model.predict(X_test)
-            print(f"Accuracy: {accuracy_score(y_test, y_pred_test):.2f}")
-            print("Classification Report:")
-            report_target_names = [str(c) for c in model.classes_]
-            unique_test_labels = np.unique(np.concatenate((y_test.unique(), y_pred_test)))
-            # Ensure final_report_labels uses model.classes_ which now contain scoreline strings
-            final_report_labels = [l for l in model.classes_ if l in unique_test_labels]
-            # Filter target_names to only include labels present in final_report_labels to avoid warnings
-            filtered_target_names = [name for name in report_target_names if name in [str(l) for l in final_report_labels]]
 
+            # Scoreline Accuracy
+            scoreline_accuracy = accuracy_score(y_test, y_pred_test)
+            print(f"Scoreline Accuracy (exact score): {scoreline_accuracy:.2f}")
 
-            print(classification_report(y_test, y_pred_test, target_names=filtered_target_names, labels=final_report_labels, zero_division=0))
+            # Outcome Accuracy
+            y_test_outcomes = y_test.apply(get_outcome_from_scoreline)
+            y_pred_outcomes = pd.Series(y_pred_test, index=y_test.index).apply(get_outcome_from_scoreline)
+
+            valid_indices = (y_test_outcomes != "UNKNOWN") & (y_pred_outcomes != "UNKNOWN")
+            y_test_outcomes_valid = y_test_outcomes[valid_indices]
+            y_pred_outcomes_valid = y_pred_outcomes[valid_indices]
+
+            if not y_test_outcomes_valid.empty:
+                outcome_accuracy = accuracy_score(y_test_outcomes_valid, y_pred_outcomes_valid)
+                print(f"Outcome Accuracy (Win/Loss/Draw): {outcome_accuracy:.2f}")
+            else:
+                print("Outcome Accuracy (Win/Loss/Draw): Could not be calculated (no valid comparable outcomes).")
+
+            print("\nClassification Report (Scorelines):")
+            actual_present_scoreline_labels = np.unique(np.concatenate((y_test.unique(), y_pred_test)))
+            report_labels_scoreline = sorted([l for l in model.classes_ if l in actual_present_scoreline_labels])
+            
+            if report_labels_scoreline:
+                report_target_names_scoreline = [str(l) for l in report_labels_scoreline]
+                print(classification_report(y_test, y_pred_test, 
+                                            labels=report_labels_scoreline, 
+                                            target_names=report_target_names_scoreline, 
+                                            zero_division=0))
+            else:
+                print("Could not generate classification report for scorelines (no common/reportable labels).")
+
+            # Classification Report for Outcomes
+            if not y_test_outcomes_valid.empty:
+                print("\nClassification Report (Outcomes - Win/Loss/Draw):")
+                outcome_order = ["WIN", "DRAW", "LOSS"] 
+                present_outcome_labels = sorted(
+                    list(set(y_test_outcomes_valid.unique()) | set(y_pred_outcomes_valid.unique())),
+                    key=lambda x: outcome_order.index(x) if x in outcome_order else float('inf')
+                )
+                present_outcome_labels = [l for l in present_outcome_labels if l in outcome_order]
+
+                if present_outcome_labels:
+                    print(classification_report(y_test_outcomes_valid, y_pred_outcomes_valid, 
+                                                labels=present_outcome_labels, 
+                                                zero_division=0))
+                else:
+                    print("Could not generate classification report for outcomes (no reportable outcome labels).")
+            else:
+                print("No valid outcomes to generate an outcome classification report.")
+
         elif not X_train.empty and y_train.size > 0:
             print("\nNote: Model was trained on all available historical H2H data, or test set was too small; no separate test set evaluation performed.")
             

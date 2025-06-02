@@ -10,58 +10,61 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+ALLOWED_LEAGUES = {
+    "BL1": "Bundesliga",
+    "DED": "Eredivisie",
+    "BSA": "Campeonato Brasileiro Série A",
+    "PD": "Primera Division",
+    "FL1": "Ligue 1",
+    "ELC": "Championship",
+    "PPL": "Primeira Liga",
+    "SA": "Serie A",
+    "PL": "Premier League"
+}
+
 def get_match_outcome(match_data, team_id_of_interest):
     """
     Determines the outcome of a match for a specific team_id_of_interest
-    based on api-football.com fixture data structure.
+    based on football-data.org fixture data structure (new format).
     """
-    teams_data = match_data.get('teams', {})
-    home_team_data = teams_data.get('home', {})
-    away_team_data = teams_data.get('away', {})
-    goals_data = match_data.get('goals', {})
+    home_team_data = match_data.get('homeTeam')
+    away_team_data = match_data.get('awayTeam')
+    score_data = match_data.get('score')
 
-    if not home_team_data or not away_team_data or not goals_data:
+    if not home_team_data or not away_team_data or not score_data:
         return None
 
     home_id = home_team_data.get('id')
     away_id = away_team_data.get('id')
-    home_winner = home_team_data.get('winner')
-    away_winner = away_team_data.get('winner')
-    home_goals = goals_data.get('home')
-    away_goals = goals_data.get('away')
+    winner_status = score_data.get('winner')
+    
+    full_time_score = score_data.get('fullTime')
+    if full_time_score is None:
+        return None
+        
+    home_goals = full_time_score.get('home')
+    away_goals = full_time_score.get('away')
 
-    if home_id is None or away_id is None or home_goals is None or away_goals is None:
+    if home_id is None or away_id is None:
         return None
 
-    # Case 1: Explicit winner
-    if home_winner is True and team_id_of_interest == home_id:
-        return 'WIN'
-    if away_winner is True and team_id_of_interest == away_id:
-        return 'WIN'
-    
-    # Case 2: Explicit draw
-    if home_winner is False and away_winner is False:
+    if winner_status == "HOME_TEAM":
+        return 'WIN' if team_id_of_interest == home_id else 'LOSS'
+    elif winner_status == "AWAY_TEAM":
+        return 'WIN' if team_id_of_interest == away_id else 'LOSS'
+    elif winner_status == "DRAW":
         return 'DRAW'
-    
-    # Case 3: Scores are equal -> draw
-    if home_goals == away_goals:
-        return 'DRAW'
-
-    # Case 4: Loss for the team of interest
-    if team_id_of_interest == home_id and home_winner is False:
-        return 'LOSS'
-    if team_id_of_interest == away_id and away_winner is False:
-        return 'LOSS'
+    else:
+        # Fallback if winner_status is None or unexpected, use scores
+        if home_goals is None or away_goals is None:
+            return None
+        if home_goals > away_goals:
+            return 'WIN' if team_id_of_interest == home_id else 'LOSS'
+        elif away_goals > home_goals:
+            return 'WIN' if team_id_of_interest == away_id else 'LOSS'
+        else:
+            return 'DRAW'
         
-    # Case 5: Fallback if winner booleans are None but scores differ
-    if team_id_of_interest == home_id:
-        return 'WIN' if home_goals > away_goals else 'LOSS'
-    if team_id_of_interest == away_id:
-        return 'WIN' if away_goals > home_goals else 'LOSS'
-    
-    # If none of the above conditions matched, return None
-    return None 
-
 def get_outcome_from_scoreline(scoreline_str):
     """Converts a 'H-A' scoreline string to 'WIN', 'LOSS', or 'DRAW' for the home team."""
     try:
@@ -90,6 +93,7 @@ def get_outcome_from_scoreline(scoreline_str):
 def calculate_h2h_features(h2h_matches: list, perspective_home_team_id: int, perspective_away_team_id: int):
     """
     Calculates head-to-head features from the perspective of perspective_home_team_id.
+    Uses new match data structure.
     """
     features = {
         'h2h_home_wins': 0,
@@ -100,16 +104,20 @@ def calculate_h2h_features(h2h_matches: list, perspective_home_team_id: int, per
         'h2h_matches_played': 0
     }
     
-    # Filter matches that have necessary data
     for match in h2h_matches:
-        teams = match.get('teams', {})
-        goals = match.get('goals', {})
-        if not teams or not goals or not teams.get('home') or not teams.get('away'):
+        home_team_data = match.get('homeTeam')
+        away_team_data = match.get('awayTeam')
+        score_data = match.get('score', {}).get('fullTime')
+
+        if not home_team_data or not away_team_data or not score_data:
             continue
 
-        match_home_id = teams['home'].get('id')
-        match_away_id = teams['away'].get('id')
+        match_home_id = home_team_data.get('id')
+        match_away_id = away_team_data.get('id')
         
+        if match_home_id is None or match_away_id is None:
+            continue
+            
         if not ({match_home_id, match_away_id} == {perspective_home_team_id, perspective_away_team_id}):
             continue 
             
@@ -124,18 +132,23 @@ def calculate_h2h_features(h2h_matches: list, perspective_home_team_id: int, per
         elif outcome_for_perspective_home == 'LOSS':
             features['h2h_away_wins'] += 1
 
-        if match_home_id == perspective_home_team_id:
-            if goals.get('home') is not None: features['h2h_home_goals_sum'] += goals['home']
-            if goals.get('away') is not None: features['h2h_away_goals_sum'] += goals['away']
-        elif match_away_id == perspective_home_team_id:
-            if goals.get('away') is not None: features['h2h_home_goals_sum'] += goals['away']
-            if goals.get('home') is not None: features['h2h_away_goals_sum'] += goals['home']
+        home_goals_match = score_data.get('home')
+        away_goals_match = score_data.get('away')
+
+        if home_goals_match is not None and away_goals_match is not None:
+            if match_home_id == perspective_home_team_id:
+                features['h2h_home_goals_sum'] += home_goals_match
+                features['h2h_away_goals_sum'] += away_goals_match
+            elif match_away_id == perspective_home_team_id:
+                features['h2h_home_goals_sum'] += away_goals_match
+                features['h2h_away_goals_sum'] += home_goals_match
             
     return features
 
-def calculate_form_features(team_matches: list, team_id: int, num_games: int = 5):
+def calculate_form_features(team_matches: list, team_id: int, num_games: int):
     """
     Calculates form features for a team from their last N games.
+    Uses new match data structure.
     """
     features = {
         f'form_wins_last_{num_games}': 0,
@@ -147,10 +160,15 @@ def calculate_form_features(team_matches: list, team_id: int, num_games: int = 5
         f'form_matches_considered': 0
     }
     
-    # Filter for matches with necessary data and sort by date
-    valid_matches = [m for m in team_matches if m.get('fixture', {}).get('date') and m.get('teams') and m.get('goals')]
+    valid_matches = [
+        m for m in team_matches 
+        if m.get('utcDate') and \
+           m.get('homeTeam') and m.get('awayTeam') and \
+           m.get('score', {}).get('fullTime')
+    ]
     try:
-        sorted_matches = sorted(valid_matches, key=lambda x: x['fixture']['date'], reverse=True)
+        # Sort by date, descending (most recent first)
+        sorted_matches = sorted(valid_matches, key=lambda x: x['utcDate'], reverse=True)
     except (TypeError, KeyError) as e:
         print(f"Error sorting matches for team {team_id} (form calculation): {e}")
         return features
@@ -163,8 +181,9 @@ def calculate_form_features(team_matches: list, team_id: int, num_games: int = 5
 
     for match in recent_n_games:
         outcome = get_match_outcome(match, team_id)
-        goals = match['goals']
-        teams = match['teams']
+        score_full_time = match.get('score', {}).get('fullTime', {})
+        home_team_data = match.get('homeTeam', {})
+        away_team_data = match.get('awayTeam', {})
 
         if outcome == 'WIN':
             features[f'form_wins_last_{num_games}'] += 1
@@ -173,16 +192,52 @@ def calculate_form_features(team_matches: list, team_id: int, num_games: int = 5
         elif outcome == 'LOSS':
             features[f'form_losses_last_{num_games}'] += 1
 
-        # Accumulate goals based on whether team_id was home or away in this match
-        if teams.get('home', {}).get('id') == team_id:
-            if goals.get('home') is not None: features[f'form_goals_scored_last_{num_games}'] += goals['home']
-            if goals.get('away') is not None: features[f'form_goals_conceded_last_{num_games}'] += goals['away']
-        elif teams.get('away', {}).get('id') == team_id:
-            if goals.get('away') is not None: features[f'form_goals_scored_last_{num_games}'] += goals['away']
-            if goals.get('home') is not None: features[f'form_goals_conceded_last_{num_games}'] += goals['home']
+        match_home_goals = score_full_time.get('home')
+        match_away_goals = score_full_time.get('away')
+
+        if match_home_goals is not None and match_away_goals is not None:
+            if home_team_data.get('id') == team_id:
+                features[f'form_goals_scored_last_{num_games}'] += match_home_goals
+                features[f'form_goals_conceded_last_{num_games}'] += match_away_goals
+            elif away_team_data.get('id') == team_id:
+                features[f'form_goals_scored_last_{num_games}'] += match_away_goals
+                features[f'form_goals_conceded_last_{num_games}'] += match_home_goals
             
     features[f'form_goal_diff_last_{num_games}'] = features[f'form_goals_scored_last_{num_games}'] - features[f'form_goals_conceded_last_{num_games}']
     return features
+
+def get_most_recent_h2h_match_id(matches_pool: list, team1_id: int, team2_id: int) -> int | None:
+    """
+    Finds the ID of the most recent head-to-head match between two teams from a given pool of matches.
+    Returns None if no such match is found.
+    """
+    h2h_matches_found = []
+    for match in matches_pool:
+        home_team_data = match.get('homeTeam')
+        away_team_data = match.get('awayTeam')
+        match_id = match.get('id')
+
+        # Ensure essential data fields are present
+        if not (home_team_data and away_team_data and match_id is not None):
+            continue
+
+        match_home_id = home_team_data.get('id')
+        match_away_id = away_team_data.get('id')
+
+        if match_home_id is None or match_away_id is None:
+            continue
+
+        # Check if the current match is between the two specified teams
+        is_h2h = (match_home_id == team1_id and match_away_id == team2_id) or \
+                   (match_home_id == team2_id and match_away_id == team1_id)
+
+        if is_h2h:
+            h2h_matches_found.append(match_id)
+
+    if not h2h_matches_found:
+        return None
+
+    return h2h_matches_found[len(h2h_matches_found)-1]
 
 def generate_score_grid_probabilities(model_classes, probabilities_array):
     '''
@@ -218,67 +273,76 @@ def generate_score_grid_probabilities(model_classes, probabilities_array):
             
     return score_grid
 
-def create_dataset_from_matches(all_historical_h2h_matches: list, num_form_games: int = 5):
+def create_dataset_from_matches(historical_h2h_matches: list,
+                                home_team_all_matches_pool: list, 
+                                away_team_all_matches_pool: list, 
+                                num_form_games: int):
     """
     Creates a dataset from historical H2H matches. For each match, features are calculated
     based on data *prior* to that match. Perspective is always actual home team of that historical match.
+    Uses new match data structure.
+    Form features are derived from the provided broader match pools for each team.
     """
     dataset = []
     
-    # Ensure matches have minimal required data and sort them chronologically (oldest first)
+    # Ensure matches have minimal required data and sort them chronologically
     valid_matches = [
-        m for m in all_historical_h2h_matches 
-        if m.get('fixture', {}).get('date') and \
-           m.get('teams', {}).get('home', {}).get('id') is not None and \
-           m.get('teams', {}).get('away', {}).get('id') is not None and \
-           m.get('goals') is not None
+        m for m in historical_h2h_matches 
+        if m.get('utcDate') and \
+           m.get('homeTeam', {}).get('id') is not None and \
+           m.get('awayTeam', {}).get('id') is not None and \
+           m.get('score', {}).get('fullTime', {}).get('home') is not None and \
+           m.get('score', {}).get('fullTime', {}).get('away') is not None and \
+           m.get('id') is not None
     ]
     try:
-        sorted_historical_matches = sorted(valid_matches, key=lambda x: x['fixture']['date'])
+        sorted_historical_matches = sorted(valid_matches, key=lambda x: x['utcDate'])
     except (TypeError, KeyError) as e:
         print(f"Error sorting historical H2H matches for dataset creation: {e}")
         return pd.DataFrame()
 
     for i, current_match in enumerate(sorted_historical_matches):
-        fixture_data = current_match['fixture']
-        teams_data = current_match['teams']
-        current_match_date_str = fixture_data['date']
+        current_match_date_str = current_match['utcDate']
+        current_match_id = current_match['id']
         
-        actual_home_id = teams_data['home']['id']
-        actual_away_id = teams_data['away']['id']
+        actual_home_id = current_match['homeTeam']['id']
+        actual_away_id = current_match['awayTeam']['id']
             
-        goals_data = current_match.get('goals', {})
-        home_goals = goals_data.get('home')
-        away_goals = goals_data.get('away')
+        score_full_time = current_match.get('score', {}).get('fullTime', {})
+        home_goals = score_full_time.get('home')
+        away_goals = score_full_time.get('away')
 
-        # Check if goals are None, if so, skip this match for the dataset
         if home_goals is None or away_goals is None:
-            print(f"Skipping match {current_match.get('fixture', {}).get('id')} due to missing goals data.")
+            print(f"Skipping match {current_match_id} due to missing goals data (should have been filtered).")
             continue
 
         home_goals_capped = min(home_goals, 5)
         away_goals_capped = min(away_goals, 5)
         target_scoreline = f"{home_goals_capped}-{away_goals_capped}"
 
+        # Features are calculated based on matches *before* the current one
         matches_before_current = sorted_historical_matches[:i]
         
         h2h_features = calculate_h2h_features(matches_before_current, actual_home_id, actual_away_id)
         
+        # Form features: Need all matches of each team *before* current_match_date_str
+        # Use the provided broader pools for form calculation.
+        
         home_team_matches_for_form_calc = [
-            m for m in all_historical_h2h_matches
-            if m['fixture']['date'] < current_match_date_str and 
-               (m['teams']['home']['id'] == actual_home_id or m['teams']['away']['id'] == actual_home_id)
+            m for m in home_team_all_matches_pool
+            if m['utcDate'] < current_match_date_str and 
+               (m.get('homeTeam', {}).get('id') == actual_home_id or m.get('awayTeam', {}).get('id') == actual_home_id)
         ]
         away_team_matches_for_form_calc = [
-            m for m in all_historical_h2h_matches
-            if m['fixture']['date'] < current_match_date_str and
-               (m['teams']['home']['id'] == actual_away_id or m['teams']['away']['id'] == actual_away_id)
+            m for m in away_team_all_matches_pool
+            if m['utcDate'] < current_match_date_str and
+               (m.get('homeTeam', {}).get('id') == actual_away_id or m.get('awayTeam', {}).get('id') == actual_away_id)
         ]
 
         home_form = calculate_form_features(home_team_matches_for_form_calc, actual_home_id, num_form_games)
         away_form = calculate_form_features(away_team_matches_for_form_calc, actual_away_id, num_form_games)
 
-        row = {'match_id': fixture_data.get('id'), 'date': current_match_date_str,
+        row = {'match_id': current_match_id, 'date': current_match_date_str,
                'home_team_id_h2h_match': actual_home_id, 'away_team_id_h2h_match': actual_away_id}
         row.update(h2h_features)
         for key, val in home_form.items(): row[f'current_home_{key}'] = val
@@ -289,73 +353,175 @@ def create_dataset_from_matches(all_historical_h2h_matches: list, num_form_games
     return pd.DataFrame(dataset)
 
 def get_user_input():
-    """Gets team names and API key from the user."""
-    home_team_name = input("Enter the home team name: ")
-    away_team_name = input("Enter the away team name: ")
-    api_key = os.getenv("API_KEY")
-    if not api_key:
-        print("\nYour api-football.com API key is not set as an environment variable (API_KEY).")
-        api_key = input("Please enter your api-football.com API key: ")
-    else:
-        print("\nUsing api-football.com API key from environment variable.")
-    return home_team_name, away_team_name, api_key
+    """
+    Gets team names, leagues, and API key from the user.
+    Allows league input by code or full name.
+    """    
+    valid_home_league = False
+    home_team_league_code = ""
+    while not valid_home_league:
+        print("\nAvailable leagues (enter code or full name):")
+        for code, name in ALLOWED_LEAGUES.items():
+            print(f"  {code}: {name}")
+        home_team_league_input = input(f"Enter the home team's league (e.g., PL or Premier League): ").strip()
+        
+        if home_team_league_input.upper() in ALLOWED_LEAGUES:
+            home_team_league_code = home_team_league_input.upper()
+            print(f"Selected home team league: {ALLOWED_LEAGUES[home_team_league_code]}")
+            valid_home_league = True
+        else:
+            found_by_name = False
+            for code, name in ALLOWED_LEAGUES.items():
+                if home_team_league_input.lower() == name.lower():
+                    home_team_league_code = code
+                    print(f"Selected home team league: {name}")
+                    valid_home_league = True
+                    found_by_name = True
+                    break
+            if not found_by_name:
+                print(f"Invalid league '{home_team_league_input}'. Please choose from the list above by code or full name.")
+
+    home_team_list = api_client.get_teams_by_league(home_team_league_code)
+    valid_home_team_name = False
+    while not valid_home_team_name:
+        print("\nAvailable home teams:")
+        for team in home_team_list:
+            print(f"  {team['name']}: {team['shortName']}: {team['tla']}")
+    
+        home_team_name = None
+        while not home_team_name:
+            home_team_name = input("Enter the home team name (full name, shortname, or tla): ").strip()
+            
+        found_team = False
+        for team in home_team_list:
+            if (home_team_name.lower() == team['name'].lower() or 
+                home_team_name.lower() == team['shortName'].lower() or 
+                home_team_name.lower() == team['tla'].lower()):
+
+                home_team_name = team['name']
+                home_team_id = team['id']
+                print(f"Selected home team: {home_team_name}")
+                valid_home_team_name = True
+                found_team = True
+                break
+        if not found_team:
+            print(f"Invalid home team '{home_team_name}'. Please choose from the list above by full name, shortname, or tla.")
+
+    valid_away_league = False
+    away_team_league_code = ""
+    while not valid_away_league:
+        print("\nAvailable leagues (enter code or full name):")
+        for code, name in ALLOWED_LEAGUES.items():
+            print(f"  {code}: {name}")
+        away_team_league_input = input(f"Enter the away team's league (e.g., PL or Premier League): ").strip()
+
+        if away_team_league_input.upper() in ALLOWED_LEAGUES:
+            away_team_league_code = away_team_league_input.upper()
+            print(f"Selected away team league: {ALLOWED_LEAGUES[away_team_league_code]}")
+            valid_away_league = True
+        else:
+            found_by_name = False
+            for code, name in ALLOWED_LEAGUES.items():
+                if away_team_league_input.lower() == name.lower():
+                    away_team_league_code = code
+                    print(f"Selected away team league: {name}")
+                    valid_away_league = True
+                    found_by_name = True
+                    break
+            if not found_by_name:
+                print(f"Invalid league '{away_team_league_input}'. Please choose from the list above by code or full name.")
+    
+    away_team_list = api_client.get_teams_by_league(away_team_league_code)
+    valid_away_team_name = False
+    while not valid_away_team_name:
+        print("\nAvailable away teams:")
+        for team in away_team_list:
+            print(f"  {team['name']}: {team['shortName']}: {team['tla']}")
+    
+        away_team_name = None
+        while not away_team_name:
+            away_team_name = input("Enter the away team name (full name, shortname, or tla): ").strip()
+            
+        found_team = False
+        for team in away_team_list:
+            if (away_team_name.lower() == team['name'].lower() or 
+                away_team_name.lower() == team['shortName'].lower() or 
+                away_team_name.lower() == team['tla'].lower()):
+
+                away_team_name = team['name']
+                away_team_id = team['id']
+                print(f"Selected away team: {away_team_name}")
+                valid_away_team_name = True
+                found_team = True
+                break
+        if not found_team:
+            print(f"Invalid away team '{away_team_name}'. Please choose from the list above by full name, shortname, or tla.")
+    
+    return home_team_name, home_team_id, home_team_league_code, away_team_name, away_team_id, away_team_league_code
 
 def main():
-    print("--- Soccer Match Predictor (using api-football.com) ---")
-    home_team_name, away_team_name, api_key = get_user_input()
+    print("--- Soccer Match Predictor (using football-data.org) ---")
 
-    if not all([home_team_name, away_team_name, api_key]):
-        print("Error: Home team, away team, and API key must be provided.")
-        return
+    api_key = os.getenv("API_KEY")
+    if not api_key:
+        print("\nYour football-data.org API key is not set as an environment variable (API_KEY).")
+        api_key = input("Please enter your football-data.org API key: ")
+    else:
+        print("\nUsing football-data.org API key from environment variable.")
+
     api_client.set_api_key(api_key)
 
-    print(f"\nFetching ID for home team (user specified): {home_team_name}...")
-    user_home_team_id = api_client.get_team_id(home_team_name)
-    if not user_home_team_id:
-        print(f"Could not find team ID for {home_team_name}. Exiting.")
+    home_team_name, home_team_id, home_team_league_code, away_team_name, away_team_id, away_team_league_code = get_user_input()
+
+    if not all([home_team_name, home_team_id, home_team_league_code, away_team_name, away_team_id, away_team_league_code]):
+        print("Error: Home team/league and away team/league must be provided.")
         return
-    print(f"Found ID for {home_team_name}: {user_home_team_id}")
+
+    print(f"\nFetching ID for home team (user specified): {home_team_name}...")
+    print(f"Found ID for {home_team_name}: {home_team_id}")
 
     print(f"\nFetching ID for away team (user specified): {away_team_name}...")
-    user_away_team_id = api_client.get_team_id(away_team_name)
-    if not user_away_team_id:
-        print(f"Could not find team ID for {away_team_name}. Exiting.")
-        return
-    print(f"Found ID for {away_team_name}: {user_away_team_id}")
-
+    print(f"Found ID for {away_team_name}: {away_team_id}")
+    
     print("\n--- Fetching Historical & Recent Match Data ---")
-    num_form_games = 10 # For form calculation (last N games)
-    num_years_history = 5 # For H2H history (last N years)
+    num_form_games = 10
+    num_years_history = 2
 
     date_to = datetime.now()
-    date_from_h2h_history = date_to - timedelta(days=num_years_history*365)
+    date_from_history = date_to - timedelta(days=num_years_history*365)
 
     date_to_str = date_to.strftime('%Y-%m-%d')
-    date_from_h2h_history_str = date_from_h2h_history.strftime('%Y-%m-%d')
-
-    print(f"Fetching H2H matches between {home_team_name} and {away_team_name} (from {date_from_h2h_history_str} to {date_to_str})...")
-    all_h2h_matches_for_stats_and_dataset = api_client.get_head_to_head_matches(
-        user_home_team_id, user_away_team_id, 
-        date_from=date_from_h2h_history_str, date_to=date_to_str
-    )
-    if not all_h2h_matches_for_stats_and_dataset:
-        print(f"Warning: No direct H2H matches found for {home_team_name} vs {away_team_name} in the last {num_years_history} years. Model training might fail or be unreliable.")
-    else:
-        print(f"Found {len(all_h2h_matches_for_stats_and_dataset)} H2H matches for stats and dataset construction.")
+    date_from_history_str = date_from_history.strftime('%Y-%m-%d')
 
     print(f"\nFetching recent matches for {home_team_name} (pool for current form)...")
-    home_team_recent_matches_pool = api_client.get_matches_for_team(user_home_team_id, "2021-01-01", "2023-12-31")
+    home_team_recent_matches_pool = api_client.get_matches_for_team(home_team_id, date_from_history_str, date_to_str)
     print(f"Found {len(home_team_recent_matches_pool)} matches in pool for {home_team_name}.")
 
     print(f"\nFetching recent matches for {away_team_name} (pool for current form)...")
-    away_team_recent_matches_pool = api_client.get_matches_for_team(user_away_team_id, "2021-01-01", "2023-12-31")
+    away_team_recent_matches_pool = api_client.get_matches_for_team(away_team_id, date_from_history_str, date_to_str)
     print(f"Found {len(away_team_recent_matches_pool)} matches in pool for {away_team_name}.")
-    
+
+    most_recent_h2h_match_id = get_most_recent_h2h_match_id(home_team_recent_matches_pool, home_team_id, away_team_id)
+    if most_recent_h2h_match_id is not None:
+        print(f"Fetching H2H matches between {home_team_name} and {away_team_name}...")
+        historical_h2h_matches = api_client.get_head_to_head_matches(most_recent_h2h_match_id)
+        if not historical_h2h_matches:
+            print(f"Warning: No direct H2H matches found for {home_team_name} vs {away_team_name}. Model training might fail or be unreliable.")
+        else:
+            print(f"Found {len(historical_h2h_matches)} H2H matches for stats and dataset construction.")
+    else:
+        print(f"No recent H2H matches found between {home_team_name} and {away_team_name}. Cannot train model without H2H data. Exiting.")
+        return
+
     print("\n--- Feature Engineering ---")
     historical_df = pd.DataFrame()
-    if all_h2h_matches_for_stats_and_dataset:
-        historical_df = create_dataset_from_matches(all_h2h_matches_for_stats_and_dataset, num_form_games=num_form_games)
-    
+    if historical_h2h_matches:
+        historical_df = create_dataset_from_matches(
+            historical_h2h_matches,
+            home_team_recent_matches_pool,
+            away_team_recent_matches_pool,
+            num_form_games=num_form_games
+        )
     if historical_df.empty:
         print("Could not create a training dataset (historical_df is empty). Model cannot be trained. Exiting.")
         return
@@ -415,9 +581,9 @@ def main():
         return
 
     print("\n--- Prediction for Upcoming Match ---")
-    upcoming_h2h_features = calculate_h2h_features(all_h2h_matches_for_stats_and_dataset, user_home_team_id, user_away_team_id)
-    upcoming_home_form = calculate_form_features(home_team_recent_matches_pool, user_home_team_id, num_form_games)
-    upcoming_away_form = calculate_form_features(away_team_recent_matches_pool, user_away_team_id, num_form_games)
+    upcoming_h2h_features = calculate_h2h_features(historical_h2h_matches, home_team_id, away_team_id)
+    upcoming_home_form = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games)
+    upcoming_away_form = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games)
     
     upcoming_match_features_dict = {}
     upcoming_match_features_dict.update(upcoming_h2h_features)

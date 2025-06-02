@@ -101,7 +101,12 @@ def calculate_h2h_features(h2h_matches: list, perspective_home_team_id: int, per
         'h2h_away_wins': 0,
         'h2h_home_goals_sum': 0,
         'h2h_away_goals_sum': 0,
-        'h2h_matches_played': 0
+        'h2h_matches_played': 0,
+        'h2h_avg_goals_scored_perspective': 0.0,
+        'h2h_avg_goals_conceded_perspective': 0.0,
+        'h2h_win_rate_perspective': 0.0,
+        'h2h_draw_rate_perspective': 0.0,
+        'h2h_loss_rate_perspective': 0.0,
     }
     
     for match in h2h_matches:
@@ -142,26 +147,53 @@ def calculate_h2h_features(h2h_matches: list, perspective_home_team_id: int, per
             elif match_away_id == perspective_home_team_id:
                 features['h2h_home_goals_sum'] += away_goals_match
                 features['h2h_away_goals_sum'] += home_goals_match
-            
+        
+        if features['h2h_matches_played'] > 0:
+            features['h2h_avg_goals_scored_perspective'] = features['h2h_home_goals_sum'] / features['h2h_matches_played']
+            features['h2h_avg_goals_conceded_perspective'] = features['h2h_away_goals_sum'] / features['h2h_matches_played']
+            features['h2h_win_rate_perspective'] = features['h2h_home_wins'] / features['h2h_matches_played']
+            features['h2h_draw_rate_perspective'] = features['h2h_draws'] / features['h2h_matches_played']
+            features['h2h_loss_rate_perspective'] = features['h2h_away_wins'] / features['h2h_matches_played']
+
     return features
 
-def calculate_form_features(team_matches: list, team_id: int, num_games: int):
+def calculate_form_features(team_matches: list, team_id: int, num_games: int, venue_filter: str | None = None):
     """
     Calculates form features for a team from their last N games.
-    Uses new match data structure.
+    More recent matches within the window have higher weight.
+    Can be filtered by venue ('HOME', 'AWAY', or None for overall).
     """
+    prefix = ""
+    if venue_filter == "HOME":
+        prefix = "home_venue_"
+    elif venue_filter == "AWAY":
+        prefix = "away_venue_"
+
     features = {
-        f'form_wins_last_{num_games}': 0,
-        f'form_draws_last_{num_games}': 0,
-        f'form_losses_last_{num_games}': 0,
-        f'form_goals_scored_last_{num_games}': 0,
-        f'form_goals_conceded_last_{num_games}': 0,
-        f'form_goal_diff_last_{num_games}': 0,
-        f'form_matches_considered': 0
+        f'{prefix}form_wins_last_{num_games}': 0.0,
+        f'{prefix}form_draws_last_{num_games}': 0.0,
+        f'{prefix}form_losses_last_{num_games}': 0.0,
+        f'{prefix}form_goals_scored_last_{num_games}': 0.0,
+        f'{prefix}form_goals_conceded_last_{num_games}': 0.0,
+        f'{prefix}form_goal_diff_last_{num_games}': 0.0,
+        f'{prefix}form_matches_considered': 0,
+        f'{prefix}form_avg_goals_scored_last_{num_games}': 0.0,
+        f'{prefix}form_avg_goals_conceded_last_{num_games}': 0.0,
+        f'{prefix}form_win_rate_last_{num_games}': 0.0,
+        f'{prefix}form_draw_rate_last_{num_games}': 0.0,
+        f'{prefix}form_loss_rate_last_{num_games}': 0.0,
     }
     
+    filtered_by_venue_matches = []
+    if venue_filter == "HOME":
+        filtered_by_venue_matches = [m for m in team_matches if m.get('homeTeam', {}).get('id') == team_id]
+    elif venue_filter == "AWAY":
+        filtered_by_venue_matches = [m for m in team_matches if m.get('awayTeam', {}).get('id') == team_id]
+    else:
+        filtered_by_venue_matches = team_matches
+
     valid_matches = [
-        m for m in team_matches 
+        m for m in filtered_by_venue_matches 
         if m.get('utcDate') and \
            m.get('homeTeam') and m.get('awayTeam') and \
            m.get('score', {}).get('fullTime')
@@ -174,36 +206,48 @@ def calculate_form_features(team_matches: list, team_id: int, num_games: int):
         return features
 
     recent_n_games = sorted_matches[:num_games]
-    features['form_matches_considered'] = len(recent_n_games)
+    features[f'{prefix}form_matches_considered'] = len(recent_n_games)
 
     if not recent_n_games:
         return features
 
-    for match in recent_n_games:
+    total_weight_applied = 0.0
+    for i, match in enumerate(recent_n_games):
+        match_weight = float(num_games - i)
+        total_weight_applied += match_weight
+
         outcome = get_match_outcome(match, team_id)
         score_full_time = match.get('score', {}).get('fullTime', {})
         home_team_data = match.get('homeTeam', {})
         away_team_data = match.get('awayTeam', {})
 
         if outcome == 'WIN':
-            features[f'form_wins_last_{num_games}'] += 1
+            features[f'{prefix}form_wins_last_{num_games}'] += match_weight
         elif outcome == 'DRAW':
-            features[f'form_draws_last_{num_games}'] += 1
+            features[f'{prefix}form_draws_last_{num_games}'] += match_weight
         elif outcome == 'LOSS':
-            features[f'form_losses_last_{num_games}'] += 1
+            features[f'{prefix}form_losses_last_{num_games}'] += match_weight
 
         match_home_goals = score_full_time.get('home')
         match_away_goals = score_full_time.get('away')
 
         if match_home_goals is not None and match_away_goals is not None:
             if home_team_data.get('id') == team_id:
-                features[f'form_goals_scored_last_{num_games}'] += match_home_goals
-                features[f'form_goals_conceded_last_{num_games}'] += match_away_goals
+                features[f'{prefix}form_goals_scored_last_{num_games}'] += match_home_goals * match_weight
+                features[f'{prefix}form_goals_conceded_last_{num_games}'] += match_away_goals * match_weight
             elif away_team_data.get('id') == team_id:
-                features[f'form_goals_scored_last_{num_games}'] += match_away_goals
-                features[f'form_goals_conceded_last_{num_games}'] += match_home_goals
+                features[f'{prefix}form_goals_scored_last_{num_games}'] += match_away_goals * match_weight
+                features[f'{prefix}form_goals_conceded_last_{num_games}'] += match_home_goals * match_weight
             
-    features[f'form_goal_diff_last_{num_games}'] = features[f'form_goals_scored_last_{num_games}'] - features[f'form_goals_conceded_last_{num_games}']
+    features[f'{prefix}form_goal_diff_last_{num_games}'] = features[f'{prefix}form_goals_scored_last_{num_games}'] - features[f'{prefix}form_goals_conceded_last_{num_games}']
+
+    if total_weight_applied > 0:
+        features[f'{prefix}form_avg_goals_scored_last_{num_games}'] = features[f'{prefix}form_goals_scored_last_{num_games}'] / total_weight_applied
+        features[f'{prefix}form_avg_goals_conceded_last_{num_games}'] = features[f'{prefix}form_goals_conceded_last_{num_games}'] / total_weight_applied
+        features[f'{prefix}form_win_rate_last_{num_games}'] = features[f'{prefix}form_wins_last_{num_games}'] / total_weight_applied
+        features[f'{prefix}form_draw_rate_last_{num_games}'] = features[f'{prefix}form_draws_last_{num_games}'] / total_weight_applied
+        features[f'{prefix}form_loss_rate_last_{num_games}'] = features[f'{prefix}form_losses_last_{num_games}'] / total_weight_applied
+    
     return features
 
 def get_most_recent_h2h_match_id(matches_pool: list, team1_id: int, team2_id: int) -> int | None:
@@ -339,14 +383,30 @@ def create_dataset_from_matches(historical_h2h_matches: list,
                (m.get('homeTeam', {}).get('id') == actual_away_id or m.get('awayTeam', {}).get('id') == actual_away_id)
         ]
 
-        home_form = calculate_form_features(home_team_matches_for_form_calc, actual_home_id, num_form_games)
-        away_form = calculate_form_features(away_team_matches_for_form_calc, actual_away_id, num_form_games)
+        home_form_overall = calculate_form_features(home_team_matches_for_form_calc, actual_home_id, num_form_games, venue_filter=None)
+        home_form_home_venue = calculate_form_features(home_team_matches_for_form_calc, actual_home_id, num_form_games, venue_filter="HOME")
+        home_form_away_venue = calculate_form_features(home_team_matches_for_form_calc, actual_home_id, num_form_games, venue_filter="AWAY")
+
+        away_form_overall = calculate_form_features(away_team_matches_for_form_calc, actual_away_id, num_form_games, venue_filter=None)
+        away_form_home_venue = calculate_form_features(away_team_matches_for_form_calc, actual_away_id, num_form_games, venue_filter="HOME")
+        away_form_away_venue = calculate_form_features(away_team_matches_for_form_calc, actual_away_id, num_form_games, venue_filter="AWAY")
 
         row = {'match_id': current_match_id, 'date': current_match_date_str,
                'home_team_id_h2h_match': actual_home_id, 'away_team_id_h2h_match': actual_away_id}
         row.update(h2h_features)
-        for key, val in home_form.items(): row[f'current_home_{key}'] = val
-        for key, val in away_form.items(): row[f'current_away_{key}'] = val
+
+        # Overall form
+        for key, val in home_form_overall.items(): row[f'current_home_{key}'] = val
+        for key, val in away_form_overall.items(): row[f'current_away_{key}'] = val
+        # Home team at home venue
+        for key, val in home_form_home_venue.items(): row[f'current_home_home_venue_{key}'] = val
+        # Home team at away venue
+        for key, val in home_form_away_venue.items(): row[f'current_home_away_venue_{key}'] = val
+        # Away team at home venue
+        for key, val in away_form_home_venue.items(): row[f'current_away_home_venue_{key}'] = val
+        # Away team at away venue
+        for key, val in away_form_away_venue.items(): row[f'current_away_away_venue_{key}'] = val
+        
         row['target_scoreline'] = target_scoreline
         dataset.append(row)
         
@@ -581,14 +641,35 @@ def main():
         return
 
     print("\n--- Prediction for Upcoming Match ---")
-    upcoming_h2h_features = calculate_h2h_features(historical_h2h_matches, home_team_id, away_team_id)
-    upcoming_home_form = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games)
-    upcoming_away_form = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games)
+    upcoming_h2h_features = calculate_h2h_features(historical_h2h_matches, home_team_id, away_team_id) 
     
+    # Form features for the upcoming match
+    # Overall form
+    upcoming_home_form_overall = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, venue_filter=None)
+    upcoming_away_form_overall = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, venue_filter=None)
+    
+    # Home venue specific form
+    upcoming_home_form_home_venue = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, venue_filter="HOME")
+    upcoming_away_form_home_venue = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, venue_filter="HOME")
+    
+    # Away venue specific form
+    upcoming_home_form_away_venue = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, venue_filter="AWAY")
+    upcoming_away_form_away_venue = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, venue_filter="AWAY")
+
     upcoming_match_features_dict = {}
     upcoming_match_features_dict.update(upcoming_h2h_features)
-    for key, val in upcoming_home_form.items(): upcoming_match_features_dict[f'current_home_{key}'] = val
-    for key, val in upcoming_away_form.items(): upcoming_match_features_dict[f'current_away_{key}'] = val
+    
+    # Add overall form features
+    for key, val in upcoming_home_form_overall.items(): upcoming_match_features_dict[f'current_home_{key}'] = val
+    for key, val in upcoming_away_form_overall.items(): upcoming_match_features_dict[f'current_away_{key}'] = val
+    
+    # Add home team's venue form features
+    for key, val in upcoming_home_form_home_venue.items(): upcoming_match_features_dict[f'current_home_home_venue_{key}'] = val
+    for key, val in upcoming_home_form_away_venue.items(): upcoming_match_features_dict[f'current_home_away_venue_{key}'] = val
+    
+    # Add away team's venue form features
+    for key, val in upcoming_away_form_home_venue.items(): upcoming_match_features_dict[f'current_away_home_venue_{key}'] = val
+    for key, val in upcoming_away_form_away_venue.items(): upcoming_match_features_dict[f'current_away_away_venue_{key}'] = val
 
     upcoming_features_df = pd.DataFrame([upcoming_match_features_dict])
     for col in X_train.columns:

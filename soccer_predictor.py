@@ -157,9 +157,9 @@ def calculate_h2h_features(h2h_matches: list, perspective_home_team_id: int, per
 
     return features
 
-def calculate_form_features(team_matches: list, team_id: int, num_games: int, venue_filter: str | None = None):
+def calculate_form_features(team_matches: list, team_id: int, num_games: int, team_league_code: str, api_client_ref, venue_filter: str | None = None):
     """
-    Calculates form features for a team from their last N games.
+    Calculates form features for a team from their last N games, incorporating opponent strength.
     More recent matches within the window have higher weight.
     Can be filtered by venue ('HOME', 'AWAY', or None for overall).
     """
@@ -182,8 +182,14 @@ def calculate_form_features(team_matches: list, team_id: int, num_games: int, ve
         f'{prefix}form_win_rate_last_{num_games}': 0.0,
         f'{prefix}form_draw_rate_last_{num_games}': 0.0,
         f'{prefix}form_loss_rate_last_{num_games}': 0.0,
+        f'{prefix}form_weighted_performance_points_last_{num_games}': 0.0,
+        f'{prefix}form_avg_opponent_strength_score_last_{num_games}': 0.0,
     }
     
+    weighted_performance_points_sum = 0.0
+    total_opponent_strength_score_weighted = 0.0
+    default_opponent_strength_score = 0.05 
+
     filtered_by_venue_matches = []
     if venue_filter == "HOME":
         filtered_by_venue_matches = [m for m in team_matches if m.get('homeTeam', {}).get('id') == team_id]
@@ -213,6 +219,7 @@ def calculate_form_features(team_matches: list, team_id: int, num_games: int, ve
 
     total_weight_applied = 0.0
     for i, match in enumerate(recent_n_games):
+        # Gives higher weight for more recent matches
         match_weight = float(num_games - i)
         total_weight_applied += match_weight
 
@@ -238,8 +245,42 @@ def calculate_form_features(team_matches: list, team_id: int, num_games: int, ve
             elif away_team_data.get('id') == team_id:
                 features[f'{prefix}form_goals_scored_last_{num_games}'] += match_away_goals * match_weight
                 features[f'{prefix}form_goals_conceded_last_{num_games}'] += match_home_goals * match_weight
-            
+    
+        opponent_id = None
+        if home_team_data.get('id') == team_id:
+            opponent_id = away_team_data.get('id')
+        else:
+            opponent_id = home_team_data.get('id')
+
+        opponent_strength_score = default_opponent_strength_score
+        if opponent_id and team_league_code and match.get('utcDate'):
+            try:
+                league_standings_snapshot = api_client_ref.get_league_standings(team_league_code)
+
+                if league_standings_snapshot:
+                    opponent_rank = -1
+                    for standing_entry in league_standings_snapshot:
+                        if standing_entry.get('team_id') == opponent_id:
+                            opponent_rank = standing_entry.get('position', -1)
+                            break
+                    
+                    if opponent_rank > 0:
+                        opponent_strength_score = 1.0 / opponent_rank 
+            except Exception as e:
+                print(f"Error processing opponent strength for match {match.get('id')}, opponent {opponent_id}: {e}")
+        
+        match_points = 0
+        if outcome == 'WIN':
+            match_points = 3
+        elif outcome == 'DRAW':
+            match_points = 1
+        
+        current_match_weighted_performance = match_points * opponent_strength_score * match_weight
+        weighted_performance_points_sum += current_match_weighted_performance
+        total_opponent_strength_score_weighted += opponent_strength_score * match_weight
+
     features[f'{prefix}form_goal_diff_last_{num_games}'] = features[f'{prefix}form_goals_scored_last_{num_games}'] - features[f'{prefix}form_goals_conceded_last_{num_games}']
+    features[f'{prefix}form_weighted_performance_points_last_{num_games}'] = weighted_performance_points_sum
 
     if total_weight_applied > 0:
         features[f'{prefix}form_avg_goals_scored_last_{num_games}'] = features[f'{prefix}form_goals_scored_last_{num_games}'] / total_weight_applied
@@ -247,6 +288,9 @@ def calculate_form_features(team_matches: list, team_id: int, num_games: int, ve
         features[f'{prefix}form_win_rate_last_{num_games}'] = features[f'{prefix}form_wins_last_{num_games}'] / total_weight_applied
         features[f'{prefix}form_draw_rate_last_{num_games}'] = features[f'{prefix}form_draws_last_{num_games}'] / total_weight_applied
         features[f'{prefix}form_loss_rate_last_{num_games}'] = features[f'{prefix}form_losses_last_{num_games}'] / total_weight_applied
+        features[f'{prefix}form_avg_opponent_strength_score_last_{num_games}'] = total_opponent_strength_score_weighted / total_weight_applied
+    else:
+        features[f'{prefix}form_avg_opponent_strength_score_last_{num_games}'] = default_opponent_strength_score
     
     return features
 
@@ -320,7 +364,10 @@ def generate_score_grid_probabilities(model_classes, probabilities_array):
 def create_dataset_from_matches(historical_h2h_matches: list,
                                 home_team_all_matches_pool: list, 
                                 away_team_all_matches_pool: list, 
-                                num_form_games: int):
+                                num_form_games: int,
+                                home_team_league_code_for_h2h_context: str,
+                                away_team_league_code_for_h2h_context: str,
+                                api_client_ref):
     """
     Creates a dataset from historical H2H matches. For each match, features are calculated
     based on data *prior* to that match. Perspective is always actual home team of that historical match.
@@ -383,13 +430,16 @@ def create_dataset_from_matches(historical_h2h_matches: list,
                (m.get('homeTeam', {}).get('id') == actual_away_id or m.get('awayTeam', {}).get('id') == actual_away_id)
         ]
 
-        home_form_overall = calculate_form_features(home_team_matches_for_form_calc, actual_home_id, num_form_games, venue_filter=None)
-        home_form_home_venue = calculate_form_features(home_team_matches_for_form_calc, actual_home_id, num_form_games, venue_filter="HOME")
-        home_form_away_venue = calculate_form_features(home_team_matches_for_form_calc, actual_home_id, num_form_games, venue_filter="AWAY")
+        current_home_team_league_code = home_team_league_code_for_h2h_context
+        current_away_team_league_code = away_team_league_code_for_h2h_context
+        
+        home_form_overall = calculate_form_features(home_team_matches_for_form_calc, actual_home_id, num_form_games, current_home_team_league_code, api_client_ref, venue_filter=None)
+        home_form_home_venue = calculate_form_features(home_team_matches_for_form_calc, actual_home_id, num_form_games, current_home_team_league_code, api_client_ref, venue_filter="HOME")
+        home_form_away_venue = calculate_form_features(home_team_matches_for_form_calc, actual_home_id, num_form_games, current_home_team_league_code, api_client_ref, venue_filter="AWAY")
 
-        away_form_overall = calculate_form_features(away_team_matches_for_form_calc, actual_away_id, num_form_games, venue_filter=None)
-        away_form_home_venue = calculate_form_features(away_team_matches_for_form_calc, actual_away_id, num_form_games, venue_filter="HOME")
-        away_form_away_venue = calculate_form_features(away_team_matches_for_form_calc, actual_away_id, num_form_games, venue_filter="AWAY")
+        away_form_overall = calculate_form_features(away_team_matches_for_form_calc, actual_away_id, num_form_games, current_away_team_league_code, api_client_ref, venue_filter=None)
+        away_form_home_venue = calculate_form_features(away_team_matches_for_form_calc, actual_away_id, num_form_games, current_away_team_league_code, api_client_ref, venue_filter="HOME")
+        away_form_away_venue = calculate_form_features(away_team_matches_for_form_calc, actual_away_id, num_form_games, current_away_team_league_code, api_client_ref, venue_filter="AWAY")
 
         row = {'match_id': current_match_id, 'date': current_match_date_str,
                'home_team_id_h2h_match': actual_home_id, 'away_team_id_h2h_match': actual_away_id}
@@ -580,7 +630,10 @@ def main():
             historical_h2h_matches,
             home_team_recent_matches_pool,
             away_team_recent_matches_pool,
-            num_form_games=num_form_games
+            num_form_games=num_form_games,
+            home_team_league_code_for_h2h_context=home_team_league_code,
+            away_team_league_code_for_h2h_context=away_team_league_code,
+            api_client_ref=api_client
         )
     if historical_df.empty:
         print("Could not create a training dataset (historical_df is empty). Model cannot be trained. Exiting.")
@@ -603,23 +656,8 @@ def main():
         print("Feature set X is empty after attempting to fill NaNs. Cannot train. Exiting.")
         return
 
-    min_samples_for_split = 10 
-    min_samples_per_class_for_stratify = 2
-    
-    can_stratify = len(y.unique()) > 1 and all(y.value_counts() >= min_samples_per_class_for_stratify)
-
-    X_train, X_test, y_train, y_test = pd.DataFrame(columns=X.columns), pd.Series(dtype='int'), pd.DataFrame(columns=X.columns), pd.Series(dtype='int')
-    if len(X) >= min_samples_for_split and can_stratify:
-        test_size_actual = 0.2
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size_actual, random_state=42, stratify=y)
-    elif len(X) >= min_samples_for_split:
-        print("Warning: Cannot stratify train/test split. Using non-stratified split.")
-        test_size_actual = 0.2
-        X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=test_size_actual, random_state=42)
-    else:
-        print("Warning: Dataset too small for test split. Training on all available data.")
-        X_train, y_train = X, y
-
+    X_train = X
+    y_train = y
     if X_train.empty:
         print("X_train is empty. Cannot train model. This might happen if dataset is too small. Exiting.")
         return
@@ -645,16 +683,16 @@ def main():
     
     # Form features for the upcoming match
     # Overall form
-    upcoming_home_form_overall = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, venue_filter=None)
-    upcoming_away_form_overall = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, venue_filter=None)
+    upcoming_home_form_overall = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, home_team_league_code, api_client, venue_filter=None)
+    upcoming_away_form_overall = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, away_team_league_code, api_client, venue_filter=None)
     
     # Home venue specific form
-    upcoming_home_form_home_venue = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, venue_filter="HOME")
-    upcoming_away_form_home_venue = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, venue_filter="HOME")
+    upcoming_home_form_home_venue = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, home_team_league_code, api_client, venue_filter="HOME")
+    upcoming_away_form_home_venue = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, away_team_league_code, api_client, venue_filter="HOME")
     
     # Away venue specific form
-    upcoming_home_form_away_venue = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, venue_filter="AWAY")
-    upcoming_away_form_away_venue = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, venue_filter="AWAY")
+    upcoming_home_form_away_venue = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, home_team_league_code, api_client, venue_filter="AWAY")
+    upcoming_away_form_away_venue = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, away_team_league_code, api_client, venue_filter="AWAY")
 
     upcoming_match_features_dict = {}
     upcoming_match_features_dict.update(upcoming_h2h_features)
@@ -733,63 +771,6 @@ def main():
 
         else:
             print("\nScore grid could not be generated.")
-
-        if not X_test.empty and not y_test.empty:
-            print("\n--- Model Evaluation on Test Set ---")
-            y_pred_test = model.predict(X_test)
-
-            # Scoreline Accuracy
-            scoreline_accuracy = accuracy_score(y_test, y_pred_test)
-            print(f"Scoreline Accuracy (exact score): {scoreline_accuracy:.2f}")
-
-            # Outcome Accuracy
-            y_test_outcomes = y_test.apply(get_outcome_from_scoreline)
-            y_pred_outcomes = pd.Series(y_pred_test, index=y_test.index).apply(get_outcome_from_scoreline)
-
-            valid_indices = (y_test_outcomes != "UNKNOWN") & (y_pred_outcomes != "UNKNOWN")
-            y_test_outcomes_valid = y_test_outcomes[valid_indices]
-            y_pred_outcomes_valid = y_pred_outcomes[valid_indices]
-
-            if not y_test_outcomes_valid.empty:
-                outcome_accuracy = accuracy_score(y_test_outcomes_valid, y_pred_outcomes_valid)
-                print(f"Outcome Accuracy (Win/Loss/Draw): {outcome_accuracy:.2f}")
-            else:
-                print("Outcome Accuracy (Win/Loss/Draw): Could not be calculated (no valid comparable outcomes).")
-
-            print("\nClassification Report (Scorelines):")
-            actual_present_scoreline_labels = np.unique(np.concatenate((y_test.unique(), y_pred_test)))
-            report_labels_scoreline = sorted([l for l in model.classes_ if l in actual_present_scoreline_labels])
-            
-            if report_labels_scoreline:
-                report_target_names_scoreline = [str(l) for l in report_labels_scoreline]
-                print(classification_report(y_test, y_pred_test, 
-                                            labels=report_labels_scoreline, 
-                                            target_names=report_target_names_scoreline, 
-                                            zero_division=0))
-            else:
-                print("Could not generate classification report for scorelines (no common/reportable labels).")
-
-            # Classification Report for Outcomes
-            if not y_test_outcomes_valid.empty:
-                print("\nClassification Report (Outcomes - Win/Loss/Draw):")
-                outcome_order = ["WIN", "DRAW", "LOSS"] 
-                present_outcome_labels = sorted(
-                    list(set(y_test_outcomes_valid.unique()) | set(y_pred_outcomes_valid.unique())),
-                    key=lambda x: outcome_order.index(x) if x in outcome_order else float('inf')
-                )
-                present_outcome_labels = [l for l in present_outcome_labels if l in outcome_order]
-
-                if present_outcome_labels:
-                    print(classification_report(y_test_outcomes_valid, y_pred_outcomes_valid, 
-                                                labels=present_outcome_labels, 
-                                                zero_division=0))
-                else:
-                    print("Could not generate classification report for outcomes (no reportable outcome labels).")
-            else:
-                print("No valid outcomes to generate an outcome classification report.")
-
-        elif not X_train.empty and y_train.size > 0:
-            print("\nNote: Model was trained on all available historical H2H data, or test set was too small; no separate test set evaluation performed.")
             
     except Exception as e:
         print(f"Error during prediction or evaluation: {e}")

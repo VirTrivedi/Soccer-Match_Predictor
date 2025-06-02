@@ -7,6 +7,12 @@ API_BASE_URL = "https://api.football-data.org/v4/"
 API_KEY = None
 HEADERS = {}
 
+# Cache for league teams
+league_teams_cache = {}
+
+# Cache for latest league standings
+league_standings_cache = {}
+
 def set_api_key(key: str):
     """
     Sets the API key for football-data.org.
@@ -25,7 +31,13 @@ def get_teams_by_league(league_code: str) -> list:
     """
     Fetches a simplified list of teams (name, shortName, tla) for a given league code 
     using the /competitions/{league_code}/teams endpoint of football-data.org.
+    Uses a cache to minimize API calls.
     """
+    global league_teams_cache
+
+    if league_code in league_teams_cache:
+        return league_teams_cache[league_code]
+
     if not API_KEY:
         print("Error: API key not set. Call set_api_key() first.")
         return []
@@ -45,6 +57,7 @@ def get_teams_by_league(league_code: str) -> list:
                     "shortName": team_item.get("shortName"),
                     "tla": team_item.get("tla")
                 })
+            league_teams_cache[league_code] = simplified_teams
             return simplified_teams
         else:
             print(f"No teams found for league code '{league_code}'. API Response: {data}")
@@ -125,4 +138,75 @@ def get_head_to_head_matches(match_id: int) -> list:
         return []
     except Exception as e:
         print(f"An unexpected error occurred in get_head_to_head_matches(match_id={match_id}): {e}")
+        return []
+    
+def get_league_standings(league_code: str) -> list:
+    """
+    Fetches the latest available league standings for a given league code.
+    Results are cached per league_code for the duration of the script's run.
+    Subsequent calls for the same league_code will return the cached snapshot.
+    """
+    if league_code in league_standings_cache:
+        return league_standings_cache[league_code]
+
+    if not API_KEY:
+        print("Error: API key not set. Call set_api_key() first.")
+        return []
+
+    url = f"{API_BASE_URL}competitions/{league_code}/standings"
+            
+    try:
+        response = requests.get(url, headers=HEADERS)
+        response.raise_for_status()
+        data = response.json()
+
+        standings_data = data.get("standings")
+        if not standings_data:
+            print(f"No 'standings' key found in API response for league {league_code}. Response: {data}")
+            return []
+
+        total_standings_table = None
+        for standing_type_info in standings_data:
+            if standing_type_info.get("type") == "TOTAL":
+                total_standings_table = standing_type_info.get("table")
+                break
+        
+        if not total_standings_table:
+            print(f"No 'TOTAL' standings found for league {league_code}. Available types: {[s.get('type') for s in standings_data]}")
+            return []
+
+        processed_league_table = []
+        for team_standing in total_standings_table:
+            team_info = team_standing.get("team")
+            if not team_info:
+                print(f"Warning: Team info missing for an entry in standings table. Entry: {team_standing}")
+                continue 
+
+            processed_league_table.append({
+                "team_id": team_info.get("id"),
+                "team_name": team_info.get("name"),
+                "position": team_standing.get("position"),
+                "points": team_standing.get("points"),
+                "played_games": team_standing.get("playedGames"),
+            })
+        
+        if not processed_league_table and total_standings_table:
+             print(f"Processed league table is empty, though 'total_standings_table' data was present for league {league_code}.")
+
+        league_standings_cache[league_code] = processed_league_table
+        return processed_league_table
+
+    except requests.exceptions.HTTPError as e:
+        print(f"HTTP error occurred while fetching standings for {league_code}: {e}")
+        if hasattr(e, 'response') and e.response is not None:
+            print(f"Response content: {e.response.text}")
+        return []
+    except requests.exceptions.RequestException as e:
+        print(f"API request failed for get_league_standings(league_code={league_code}): {e}")
+        return []
+    except ValueError as e:
+        print(f"Failed to decode JSON response for {league_code}: {e}")
+        return []
+    except Exception as e:
+        print(f"An unexpected error occurred in get_league_standings(league_code={league_code}): {e}")
         return []

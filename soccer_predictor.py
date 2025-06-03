@@ -2,9 +2,7 @@ import api_client
 from datetime import datetime, timedelta
 import os
 import pandas as pd
-from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestClassifier
-from sklearn.metrics import accuracy_score, classification_report
 import numpy as np
 from dotenv import load_dotenv
 
@@ -462,6 +460,194 @@ def create_dataset_from_matches(historical_h2h_matches: list,
         
     return pd.DataFrame(dataset)
 
+def predict_single_match_probabilities(model, X_train_columns_order: list, 
+                                     home_team_id: int, away_team_id: int, 
+                                     home_team_league_code: str, away_team_league_code: str, 
+                                     historical_h2h_matches_for_upcoming: list, 
+                                     home_team_recent_matches_pool: list, 
+                                     away_team_recent_matches_pool: list, 
+                                     api_client_ref, num_form_games: int) -> tuple | None:
+    """
+    Predicts scoreline probabilities for a single upcoming match.
+    """
+    try:
+        print("\n--- Calculating Features for Upcoming Match ---")
+        upcoming_h2h_features = calculate_h2h_features(historical_h2h_matches_for_upcoming, home_team_id, away_team_id)
+        
+        # Form features for the upcoming match
+        # Overall form
+        upcoming_home_form_overall = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, home_team_league_code, api_client_ref, venue_filter=None)
+        upcoming_away_form_overall = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, away_team_league_code, api_client_ref, venue_filter=None)
+        
+        # Home venue specific form for Home Team
+        upcoming_home_form_home_venue = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, home_team_league_code, api_client_ref, venue_filter="HOME")
+        # Away venue specific form for Home Team
+        upcoming_home_form_away_venue = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, home_team_league_code, api_client_ref, venue_filter="AWAY")
+        
+        # Home venue specific form for Away Team
+        upcoming_away_form_home_venue = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, away_team_league_code, api_client_ref, venue_filter="HOME")
+        # Away venue specific form for Away Team
+        upcoming_away_form_away_venue = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, away_team_league_code, api_client_ref, venue_filter="AWAY")
+
+        upcoming_match_features_dict = {}
+        upcoming_match_features_dict.update(upcoming_h2h_features)
+        
+        # Add overall form features
+        for key, val in upcoming_home_form_overall.items(): upcoming_match_features_dict[f'current_home_{key}'] = val
+        for key, val in upcoming_away_form_overall.items(): upcoming_match_features_dict[f'current_away_{key}'] = val
+        
+        # Add home team's venue form features
+        for key, val in upcoming_home_form_home_venue.items(): upcoming_match_features_dict[f'current_home_home_venue_{key}'] = val
+        for key, val in upcoming_home_form_away_venue.items(): upcoming_match_features_dict[f'current_home_away_venue_{key}'] = val
+        
+        # Add away team's venue form features
+        for key, val in upcoming_away_form_home_venue.items(): upcoming_match_features_dict[f'current_away_home_venue_{key}'] = val
+        for key, val in upcoming_away_form_away_venue.items(): upcoming_match_features_dict[f'current_away_away_venue_{key}'] = val
+
+        upcoming_features_df = pd.DataFrame([upcoming_match_features_dict])
+        
+        # Align columns with training data
+        # Ensure X_train_columns_order is a list of strings
+        if not all(isinstance(col, str) for col in X_train_columns_order):
+            print("Error: X_train_columns_order contains non-string elements.")
+            return None
+
+        for col in X_train_columns_order:
+            if col not in upcoming_features_df.columns:
+                upcoming_features_df[col] = 0 
+        upcoming_features_df = upcoming_features_df[X_train_columns_order] 
+        upcoming_features_df = upcoming_features_df.fillna(0)
+
+        if upcoming_features_df.empty:
+            print("Error: Upcoming features DataFrame is empty before prediction.")
+            return None
+
+        print("Features for upcoming match prepared. Predicting probabilities...")
+        probabilities_array = model.predict_proba(upcoming_features_df)
+        
+        if not hasattr(model, 'classes_'):
+            print("Error: Model does not have 'classes_' attribute.")
+            return None
+            
+        return probabilities_array, list(model.classes_)
+
+    except Exception as e:
+        print(f"Error in predict_single_match_probabilities: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+def train_league_model(league_code: str, api_client_ref, num_years_history: int, num_form_games: int, date_until_history: str) -> tuple | None:
+    """
+    Trains a model for an entire league based on historical data.
+    """
+    print(f"\n--- Training League Model for {league_code} ---")
+    print(f"Fetching data up to: {date_until_history}")
+
+    # Fetch all teams in league_code
+    teams_in_league = api_client_ref.get_teams_by_league(league_code)
+    if not teams_in_league:
+        print(f"Could not fetch teams for league {league_code}. Training aborted.")
+        return None
+    print(f"Found {len(teams_in_league)} teams in {league_code}.")
+
+    # Initialize all_league_matches_historical_pool
+    all_league_matches_historical_pool = []
+    
+    # Fetch match history for each team
+    try:
+        date_until_dt = datetime.strptime(date_until_history, '%Y-%m-%d')
+        date_from_dt = date_until_dt - timedelta(days=num_years_history * 365)
+        date_from_str = date_from_dt.strftime('%Y-%m-%d')
+    except ValueError:
+        print(f"Invalid date format for date_until_history: {date_until_history}. Expected YYYY-MM-DD.")
+        return None
+
+    print(f"Fetching all team matches from {date_from_str} to {date_until_history}...")
+    for team in teams_in_league:
+        team_id = team['id']
+        team_name = team['name']
+        print(f"  Fetching matches for {team_name} (ID: {team_id})...")
+        team_matches = api_client_ref.get_matches_for_team(team_id, date_from_str, date_until_history)
+        if team_matches:
+            all_league_matches_historical_pool.extend(team_matches)
+            print(f"  Added {len(team_matches)} matches for {team_name}.")
+        else:
+            print(f"  No matches found for {team_name} in the period.")
+    
+    if not all_league_matches_historical_pool:
+        print("No historical matches collected for any team. Training aborted.")
+        return None
+
+    # Remove duplicate matches and sort by date
+    print(f"Total matches collected before deduplication: {len(all_league_matches_historical_pool)}")
+    unique_matches_dict = {match['id']: match for match in all_league_matches_historical_pool if match.get('id') is not None}
+    all_league_matches_historical_pool = sorted(list(unique_matches_dict.values()), key=lambda x: x['utcDate'])
+    print(f"Total unique matches for training dataset construction: {len(all_league_matches_historical_pool)}")
+
+    if not all_league_matches_historical_pool:
+        print("No unique historical matches available after filtering. Training aborted.")
+        return None
+
+    print("\nCreating dataset from collected league matches...")
+    historical_df = create_dataset_from_matches(
+        historical_h2h_matches=all_league_matches_historical_pool,
+        home_team_all_matches_pool=all_league_matches_historical_pool,
+        away_team_all_matches_pool=all_league_matches_historical_pool,
+        num_form_games=num_form_games,
+        home_team_league_code_for_h2h_context=league_code,
+        away_team_league_code_for_h2h_context=league_code,
+        api_client_ref=api_client_ref
+    )
+
+    if historical_df.empty:
+        print("Failed to create a dataset from league matches. Training aborted.")
+        return None
+    print(f"Created dataset with {len(historical_df)} samples and {len(historical_df.columns)} columns.")
+
+    # Prepare X and y and train model
+    feature_columns = [col for col in historical_df.columns if col not in ['match_id', 'date', 'home_team_id_h2h_match', 'away_team_id_h2h_match', 'target_scoreline']]
+    X = historical_df[feature_columns]
+    y = historical_df['target_scoreline']
+    
+    X = X.fillna(0)
+
+    min_samples_for_training = 50
+    if len(historical_df) < min_samples_for_training or X.empty or y.empty:
+        print(f"Insufficient data for training. Samples: {len(historical_df)}, Features: {X.shape[1] if not X.empty else 0}. Minimum required: {min_samples_for_training}.")
+        return None
+    
+    if len(y.unique()) < 2 :
+        print(f"Target variable has only {len(y.unique())} unique classes. Need at least 2 for classification. Training aborted.")
+        return None
+
+    print(f"Training model with {len(X)} samples...")
+    try:
+        model = RandomForestClassifier(
+            n_estimators=100, 
+            random_state=42, 
+            class_weight='balanced_subsample',
+            min_samples_leaf=max(1, int(len(X) * 0.01))
+        )
+        model.fit(X, y)
+        print("League model trained successfully.")
+        
+        if hasattr(model, 'feature_importances_'):
+            importances = model.feature_importances_
+            feature_names_out = X.columns
+            feature_importance_df = pd.DataFrame({'feature': feature_names_out, 'importance': importances})
+            feature_importance_df = feature_importance_df.sort_values(by='importance', ascending=False)
+            print("\n--- Feature Importances (Top 15 from League Model) ---")
+            print(feature_importance_df.head(15))
+
+        return model, list(X.columns)
+        
+    except Exception as e:
+        print(f"Error during model training: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
 def get_user_input():
     """
     Gets team names, leagues, and API key from the user.
@@ -679,64 +865,56 @@ def main():
         return
 
     print("\n--- Prediction for Upcoming Match ---")
-    upcoming_h2h_features = calculate_h2h_features(historical_h2h_matches, home_team_id, away_team_id) 
-    
-    # Form features for the upcoming match
-    # Overall form
-    upcoming_home_form_overall = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, home_team_league_code, api_client, venue_filter=None)
-    upcoming_away_form_overall = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, away_team_league_code, api_client, venue_filter=None)
-    
-    # Home venue specific form
-    upcoming_home_form_home_venue = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, home_team_league_code, api_client, venue_filter="HOME")
-    upcoming_away_form_home_venue = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, away_team_league_code, api_client, venue_filter="HOME")
-    
-    # Away venue specific form
-    upcoming_home_form_away_venue = calculate_form_features(home_team_recent_matches_pool, home_team_id, num_form_games, home_team_league_code, api_client, venue_filter="AWAY")
-    upcoming_away_form_away_venue = calculate_form_features(away_team_recent_matches_pool, away_team_id, num_form_games, away_team_league_code, api_client, venue_filter="AWAY")
+        
+    x_train_cols_list = list(X_train.columns) if hasattr(X_train, 'columns') else []
+    if not x_train_cols_list:
+        print("Error: Could not retrieve column order from training data (X_train.columns). Cannot proceed with prediction.")
+        return
 
-    upcoming_match_features_dict = {}
-    upcoming_match_features_dict.update(upcoming_h2h_features)
-    
-    # Add overall form features
-    for key, val in upcoming_home_form_overall.items(): upcoming_match_features_dict[f'current_home_{key}'] = val
-    for key, val in upcoming_away_form_overall.items(): upcoming_match_features_dict[f'current_away_{key}'] = val
-    
-    # Add home team's venue form features
-    for key, val in upcoming_home_form_home_venue.items(): upcoming_match_features_dict[f'current_home_home_venue_{key}'] = val
-    for key, val in upcoming_home_form_away_venue.items(): upcoming_match_features_dict[f'current_home_away_venue_{key}'] = val
-    
-    # Add away team's venue form features
-    for key, val in upcoming_away_form_home_venue.items(): upcoming_match_features_dict[f'current_away_home_venue_{key}'] = val
-    for key, val in upcoming_away_form_away_venue.items(): upcoming_match_features_dict[f'current_away_away_venue_{key}'] = val
+    prediction_result = predict_single_match_probabilities(
+        model=model,
+        X_train_columns_order=x_train_cols_list,
+        home_team_id=home_team_id,
+        away_team_id=away_team_id,
+        home_team_league_code=home_team_league_code,
+        away_team_league_code=away_team_league_code,
+        historical_h2h_matches_for_upcoming=historical_h2h_matches,
+        home_team_recent_matches_pool=home_team_recent_matches_pool,
+        away_team_recent_matches_pool=away_team_recent_matches_pool,
+        api_client_ref=api_client,
+        num_form_games=num_form_games
+    )
 
-    upcoming_features_df = pd.DataFrame([upcoming_match_features_dict])
-    for col in X_train.columns:
-        if col not in upcoming_features_df.columns:
-            upcoming_features_df[col] = 0 
-    upcoming_features_df = upcoming_features_df[X_train.columns] 
-    upcoming_features_df = upcoming_features_df.fillna(0)
+    if prediction_result is None:
+        print("Prediction failed. Exiting.")
+        return
+
+    probabilities_array, model_classes = prediction_result
+    
+    if probabilities_array is None or not isinstance(probabilities_array, np.ndarray) or probabilities_array.ndim != 2:
+        print("Error: predict_single_match_probabilities returned invalid probabilities array.")
+        return
+    
+    actual_probabilities = probabilities_array[0]
 
     try:
-        probabilities = model.predict_proba(upcoming_features_df)
         print("\n--- Predicted Scoreline Probabilities (Top 5) ---")
-        if hasattr(model, 'classes_') and probabilities.shape[1] == len(model.classes_):
-            # Create a list of (scoreline, probability) tuples
+        if model_classes and len(actual_probabilities) == len(model_classes):
             score_probabilities = []
-            for i, class_label in enumerate(model.classes_):
-                score_probabilities.append((class_label, probabilities[0][i]))
+            for i, class_label in enumerate(model_classes):
+                score_probabilities.append((class_label, actual_probabilities[i]))
             
             sorted_score_probabilities = sorted(score_probabilities, key=lambda item: item[1], reverse=True)
             
-            # Print the top 5 predicted scorelines with probabilities
             for i in range(min(5, len(sorted_score_probabilities))):
                 label, prob = sorted_score_probabilities[i]
                 print(f"  Score {label}: {prob:.2%}")
         else:
-            print("Could not display score probabilities (model.classes_ or probabilities mismatch).")
+            print("Could not display score probabilities (model_classes or probabilities mismatch).")
 
         score_grid = None
-        if hasattr(model, 'classes_') and probabilities.shape[1] == len(model.classes_):
-            score_grid = generate_score_grid_probabilities(list(model.classes_), probabilities[0])
+        if model_classes and len(actual_probabilities) == len(model_classes):
+            score_grid = generate_score_grid_probabilities(model_classes, actual_probabilities)
 
         if score_grid is not None:
             print("\n--- Predicted Score Grid (Home on Left, Away on Top) ---")

@@ -34,13 +34,12 @@ def determine_match_outcome_from_probabilities(
         return None
 
     try:
-        most_likely_idx = np.argmax(probabilities_array_single_pred)
-        most_likely_score_str = model_classes[most_likely_idx]
-        probability_of_score = probabilities_array_single_pred[most_likely_idx]
+        # Select scoreline based on probability distribution
+        chosen_score_str = np.random.choice(model_classes, p=probabilities_array_single_pred)
 
-        print(f"  Most probable scoreline for {home_team_name} vs {away_team_name}: {most_likely_score_str} (Prob: {probability_of_score:.2%})")
+        print(f"  Selected scoreline for {home_team_name} vs {away_team_name}: {chosen_score_str} (Probabilistically chosen)")
 
-        score_parts = most_likely_score_str.split('-')
+        score_parts = chosen_score_str.split('-')
         home_goals = int(score_parts[0])
         away_goals = int(score_parts[1])
         
@@ -56,10 +55,10 @@ def determine_match_outcome_from_probabilities(
         else:
             outcome_str = 'DRAW'
             
-        return outcome_str, home_goals, away_goals, most_likely_score_str
+        return outcome_str, home_goals, away_goals, chosen_score_str
 
     except (ValueError, IndexError) as e:
-        print(f"Error parsing scoreline '{most_likely_score_str}' or processing probabilities: {e}")
+        print(f"Error parsing scoreline '{chosen_score_str if 'chosen_score_str' in locals() else 'unknown score'}' or processing probabilities: {e}")
         return None
     except Exception as e:
         print(f"An unexpected error in determine_match_outcome_from_probabilities: {e}")

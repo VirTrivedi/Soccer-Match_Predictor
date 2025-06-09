@@ -1,4 +1,6 @@
 import os
+import sys
+import argparse
 from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
@@ -63,48 +65,6 @@ def determine_match_outcome_from_probabilities(
     except Exception as e:
         print(f"An unexpected error in determine_match_outcome_from_probabilities: {e}")
         return None
-
-def get_season_prediction_input() -> tuple[str, str] | None:
-    """
-    Gets and validates user input for league code and CSV file path for season fixtures.
-    Allows user to quit by entering 'q'.
-    """
-    # League Input
-    league_code_upper = None
-    while True:
-        print("\nAvailable leagues for season prediction:")
-        for code, name in ALLOWED_LEAGUES.items():
-            print(f"  {code}: {name}")
-        league_code_input = input("Enter the league code (e.g., PL) or 'q' to quit: ").strip()
-
-        if league_code_input.lower() == 'q':
-            print("Exiting.")
-            return None
-        
-        league_code_upper = league_code_input.upper()
-        if league_code_upper in ALLOWED_LEAGUES:
-            print(f"Selected league: {ALLOWED_LEAGUES[league_code_upper]}")
-            break
-        else:
-            print(f"Invalid league code '{league_code_input}'. Please choose from the list or enter 'q' to quit.")
-
-    # CSV File Path Input
-    csv_file_path_str = None
-    while True:
-        csv_file_path_input = input("Enter the CSV file path for season fixtures (HomeTeamName,AwayTeamName columns) or 'q' to quit: ").strip()
-
-        if csv_file_path_input.lower() == 'q':
-            print("Exiting.")
-            return None
-
-        if os.path.exists(csv_file_path_input):
-            print(f"Selected CSV file: {csv_file_path_input}")
-            csv_file_path_str = csv_file_path_input
-            break
-        else:
-            print(f"File not found: '{csv_file_path_input}'. Please enter a valid file path or 'q' to quit.")
-            
-    return league_code_upper, csv_file_path_str
 
 def load_fixtures_from_csv_and_map_ids(csv_file_path: str, league_code: str, api_client_ref) -> list | None:
     """
@@ -186,13 +146,106 @@ def load_fixtures_from_csv_and_map_ids(csv_file_path: str, league_code: str, api
 
     return processed_fixtures
 
-def predict_entire_season(league_code: str, csv_file_path: str, api_key_val: str):
+def aggregate_simulation_results(all_simulation_tables: list[pd.DataFrame], teams_data_for_ids_names: list[dict]) -> pd.DataFrame:
+    """
+    Aggregates results from multiple season simulation tables to provide summary statistics.
+    """
+    aggregated_stats_list = []
+    
+    if not all_simulation_tables:
+        print("Warning: No simulation tables provided to aggregate.")
+        return pd.DataFrame()
+
+    team_ids_in_league = {team['id'] for team in teams_data_for_ids_names}
+    team_id_to_name_map = {team['id']: team['name'] for team in teams_data_for_ids_names}
+    num_teams_in_league = len(team_ids_in_league)
+
+    for team_id in team_ids_in_league:
+        positions = []
+        points = []
+        wins = []
+        draws = []
+        losses = []
+        goals_for = []
+        goals_against = []
+        
+        team_name = team_id_to_name_map.get(team_id, f"TeamID_{team_id}")
+
+        for table_df_original in all_simulation_tables:
+            table_df = table_df_original.copy()
+            table_df_sorted = table_df.sort_values(by=['Pts', 'GD', 'GF'], ascending=[False, False, False])
+            table_df_sorted['Pos'] = range(1, len(table_df_sorted) + 1)
+
+            if team_id in table_df_sorted.index:
+                team_row = table_df_sorted.loc[team_id]
+                positions.append(team_row['Pos'])
+                points.append(team_row['Pts'])
+                wins.append(team_row['W'])
+                draws.append(team_row['D'])
+                losses.append(team_row['L'])
+                goals_for.append(team_row['GF'])
+                goals_against.append(team_row['GA'])
+            else:
+                print(f"Warning: Team ID {team_id} not found in one of the simulation tables. Skipping for that table.")
+
+        if not positions:
+            print(f"Warning: No data collected for team ID {team_id} ({team_name}) across simulations.")
+            continue
+
+        num_simulations_for_team = len(positions)
+        
+        avg_pos = np.mean(positions) if positions else np.nan
+        median_pos = np.median(positions) if positions else np.nan
+        avg_pts = np.mean(points) if points else np.nan
+        median_pts = np.median(points) if points else np.nan
+        avg_w = np.mean(wins) if wins else np.nan
+        avg_d = np.mean(draws) if draws else np.nan
+        avg_l = np.mean(losses) if losses else np.nan
+        avg_gf = np.mean(goals_for) if goals_for else np.nan
+        avg_ga = np.mean(goals_against) if goals_against else np.nan
+        
+        p_win_league = sum(1 for p in positions if p == 1) / num_simulations_for_team if num_simulations_for_team > 0 else 0
+        p_top_4 = sum(1 for p in positions if p <= 4) / num_simulations_for_team if num_simulations_for_team > 0 else 0
+        
+        relegation_threshold = (num_teams_in_league - 3) if num_teams_in_league > 3 else num_teams_in_league 
+        p_relegation = sum(1 for p in positions if p > relegation_threshold) / num_simulations_for_team if num_simulations_for_team > 0 else 0
+        
+        position_counts = {pos: positions.count(pos) / num_simulations_for_team for pos in sorted(list(set(positions)))} if num_simulations_for_team > 0 else {}
+
+        aggregated_stats_list.append({
+            'team_id': team_id,
+            'team_name': team_name,
+            'avg_pos': avg_pos,
+            'median_pos': median_pos,
+            'avg_pts': avg_pts,
+            'median_pts': median_pts,
+            'p_win_league': p_win_league,
+            'p_top_4': p_top_4,
+            'p_relegation': p_relegation,
+            'position_counts': position_counts,
+            'avg_w': avg_w,
+            'avg_d': avg_d,
+            'avg_l': avg_l,
+            'avg_gf': avg_gf,
+            'avg_ga': avg_ga,
+            'simulations_counted': num_simulations_for_team
+        })
+
+    final_df = pd.DataFrame(aggregated_stats_list)
+    if not final_df.empty:
+        final_df = final_df.set_index('team_id')
+        final_df = final_df.sort_values(by=['avg_pos', 'avg_pts'], ascending=[True, False])
+
+    return final_df
+
+def predict_entire_season(league_code: str, csv_file_path: str, api_key_val: str, num_simulations: int = 1000):
     """
     Predicts outcomes for all matches in a given season for a league using fixtures from a CSV file,
-    and constructs a predicted league table.
+    and constructs a predicted league table. Runs multiple simulations.
     """
     api_client.set_api_key(api_key_val)
     print(f"\n--- Starting Season Prediction for {ALLOWED_LEAGUES.get(league_code, league_code)} using fixtures from: {csv_file_path} ---")
+    print(f"--- Running {num_simulations} simulations ---")
 
     # Load Fixtures from CSV
     processed_fixtures = load_fixtures_from_csv_and_map_ids(csv_file_path, league_code, api_client)
@@ -212,7 +265,6 @@ def predict_entire_season(league_code: str, csv_file_path: str, api_key_val: str
 
     current_date_str = datetime.now().strftime('%Y-%m-%d')
     date_until_history_for_training = current_date_str
-    print(f"Model training data will be fetched up to: {date_until_history_for_training}")
 
     # Train League Model
     print("\n--- Training League-Wide Model ---")
@@ -245,19 +297,20 @@ def predict_entire_season(league_code: str, csv_file_path: str, api_key_val: str
         all_teams_match_pool_for_prediction[team_id] = team_matches_pool
     print("Match pool fetching complete.")
 
-    # Initialize League Table
-    league_table_data = []
-    for team_id, team_name in team_id_to_name.items():
-        league_table_data.append({
-            'team_id': team_id, 'name': team_name, 'P': 0, 'W': 0, 'D': 0, 'L': 0, 
-            'GF': 0, 'GA': 0, 'GD': 0, 'Pts': 0
-        })
-    league_table_df = pd.DataFrame(league_table_data).set_index('team_id')
+    all_simulation_tables = []
 
-    # Iterate Through Fixtures
-    print("\n--- Predicting Season Matches from CSV ---")
-    for i, match_data in enumerate(processed_fixtures):
-        match_id = match_data.get('id')
+    for sim_num in range(num_simulations):
+        print(f"\n--- Running Simulation {sim_num + 1}/{num_simulations} ---")
+        league_table_data = []
+        for team_id, team_name in team_id_to_name.items():
+            league_table_data.append({
+                'team_id': team_id, 'name': team_name, 'P': 0, 'W': 0, 'D': 0, 'L': 0,
+                'GF': 0, 'GA': 0, 'GD': 0, 'Pts': 0
+            })
+        league_table_df = pd.DataFrame(league_table_data).set_index('team_id')
+
+        for i, match_data in enumerate(processed_fixtures):
+            match_id = match_data.get('id')
         home_team_info = match_data.get('homeTeam')
         away_team_info = match_data.get('awayTeam')
 
@@ -352,19 +405,89 @@ def predict_entire_season(league_code: str, csv_file_path: str, api_key_val: str
             league_table_df.loc[away_team_id, 'P'] += 1
             
         league_table_df['GD'] = league_table_df['GF'] - league_table_df['GA']
+        
+        all_simulation_tables.append(league_table_df.copy())
+        print(f"--- Simulation {sim_num + 1} complete. Table stored. ---")
 
+    print(f"\n--- Completed {num_simulations} season simulations. Collected {len(all_simulation_tables)} league tables. ---")
 
     # Display Final Table
-    print("\n--- Predicted Final League Table ---")
-    league_table_df_sorted = league_table_df.sort_values(by=['Pts', 'GD', 'GF'], ascending=[False, False, False])
-    
-    league_table_df_sorted.insert(0, 'Pos', range(1, len(league_table_df_sorted) + 1))
-    
-    display_columns = ['Pos', 'name', 'P', 'W', 'D', 'L', 'GF', 'GA', 'GD', 'Pts']
-    print(league_table_df_sorted[display_columns].to_string(index=False))
+    if all_simulation_tables:        
+        # Aggregate results
+        print("\n--- Aggregating Simulation Results ---")
+        aggregated_df = aggregate_simulation_results(all_simulation_tables, teams_in_league)
+        
+        if not aggregated_df.empty:
+            aggregated_df['avg_gd'] = aggregated_df['avg_gf'] - aggregated_df['avg_ga']
+
+            columns_to_display = [
+                'team_name', 'avg_pos', 'median_pos', 'avg_pts', 
+                'p_win_league', 'p_top_4', 'p_relegation', 
+                'avg_w', 'avg_d', 'avg_l', 'avg_gf', 'avg_ga', 'avg_gd'
+            ]
+            
+            display_df = aggregated_df[columns_to_display].copy()
+            
+            display_df.insert(0, 'Rank', range(1, len(display_df) + 1))
+
+            # Format columns
+            display_df['avg_pos'] = display_df['avg_pos'].map(lambda x: f'{x:.1f}' if pd.notnull(x) else 'N/A')
+            display_df['median_pos'] = display_df['median_pos'].map(lambda x: f'{x:.1f}' if pd.notnull(x) else 'N/A')
+            display_df['avg_pts'] = display_df['avg_pts'].map(lambda x: f'{x:.1f}' if pd.notnull(x) else 'N/A')
+            display_df['p_win_league'] = display_df['p_win_league'].map(lambda x: f'{x:.1%}' if pd.notnull(x) else 'N/A')
+            display_df['p_top_4'] = display_df['p_top_4'].map(lambda x: f'{x:.1%}' if pd.notnull(x) else 'N/A')
+            display_df['p_relegation'] = display_df['p_relegation'].map(lambda x: f'{x:.1%}' if pd.notnull(x) else 'N/A')
+            display_df['avg_w'] = display_df['avg_w'].map(lambda x: f'{x:.1f}' if pd.notnull(x) else 'N/A')
+            display_df['avg_d'] = display_df['avg_d'].map(lambda x: f'{x:.1f}' if pd.notnull(x) else 'N/A')
+            display_df['avg_l'] = display_df['avg_l'].map(lambda x: f'{x:.1f}' if pd.notnull(x) else 'N/A')
+            display_df['avg_gf'] = display_df['avg_gf'].map(lambda x: f'{x:.1f}' if pd.notnull(x) else 'N/A')
+            display_df['avg_ga'] = display_df['avg_ga'].map(lambda x: f'{x:.1f}' if pd.notnull(x) else 'N/A')
+            display_df['avg_gd'] = display_df['avg_gd'].map(lambda x: f'{x:.1f}' if pd.notnull(x) else 'N/A')
+
+            # Rename columns
+            display_df = display_df.rename(columns={
+                'team_name': 'Team', 'avg_pos': 'AvgPos', 'median_pos': 'MedPos', 'avg_pts': 'AvgPts',
+                'p_win_league': 'P(Win)', 'p_top_4': 'P(Top4)', 'p_relegation': 'P(Rel)',
+                'avg_w': 'AvgW', 'avg_d': 'AvgD', 'avg_l': 'AvgL', 
+                'avg_gf': 'AvgGF', 'avg_ga': 'AvgGA', 'avg_gd': 'AvgGD'
+            })
+            
+            print("\n--- Aggregated Season Simulation Results ---")
+            print(display_df.to_string(index=False))
+
+            print("\n--- Detailed Position Probabilities (Top 5 Teams by AvgPos) ---")
+            for index, row in aggregated_df.head(5).iterrows():
+                team_name = row['team_name']
+                position_counts = row['position_counts']
+                print(f"\n{team_name}:")
+                if isinstance(position_counts, dict) and position_counts:
+                    for pos, prob in sorted(position_counts.items()):
+                        print(f"  Position {int(pos)}: {prob:.1%}")
+                else:
+                    print("  No position count data available.")
+        else:
+            print("Aggregation did not produce any results (e.g. no simulations run or other error).")
+
+    else:
+        print("No simulation tables were generated to aggregate or display.")
 
 
 if __name__ == "__main__":
+    parser = argparse.ArgumentParser(description="Predicts an entire football season's outcome based on simulations.")
+    parser.add_argument("league_code", help="League code (e.g., PL, BL1).")
+    parser.add_argument("csv_file_path", help="Path to the CSV file containing season fixtures (HomeTeamName,AwayTeamName).")
+    parser.add_argument("--num_simulations", "-n", type=int, default=1000, help="Number of season simulations to run (default: 1000).")
+    
+    args = parser.parse_args()
+
+    league_to_predict = args.league_code.upper()
+    csv_path = args.csv_file_path
+    sim_count = args.num_simulations
+
+    if league_to_predict not in ALLOWED_LEAGUES:
+        print(f"Error: Invalid league code '{league_to_predict}'. Allowed leagues are: {', '.join(ALLOWED_LEAGUES.keys())}")
+        sys.exit(1)
+
     API_KEY_MAIN = os.getenv("API_KEY")
     if not API_KEY_MAIN:
         print("\nYour football-data.org API key is not set as an environment variable (API_KEY).")
@@ -372,10 +495,6 @@ if __name__ == "__main__":
     
     if not API_KEY_MAIN:
         print("API Key is required to run predictions. Exiting.")
-    else:
-        user_input = get_season_prediction_input()
-        if user_input is None:
-            pass
-        else:
-            league_to_predict, csv_path = user_input
-            predict_entire_season(league_to_predict, csv_path, API_KEY_MAIN)
+        sys.exit(1)
+    
+    predict_entire_season(league_to_predict, csv_path, API_KEY_MAIN, num_simulations=sim_count)

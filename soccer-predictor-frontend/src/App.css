@@ -1,0 +1,187 @@
+.App {
+  text-align: center;
+  min-height: 100vh;
+  display: flex;
+  flex-direction: column;
+}
+
+.App-content {
+  padding: 20px;
+  flex-grow: 1;
+  max-width: 1200px;
+  margin: 0 auto; /* Center content */
+  width: 100%;
+}
+
+h1, h2, h3, h4, h5 {
+  color: #333;
+}
+
+h1 {
+  font-size: 2em;
+  margin-bottom: 0.5em;
+}
+
+h3 { /* Form titles */
+  margin-top: 1.5em;
+  margin-bottom: 0.8em;
+  border-bottom: 1px solid #eee;
+  padding-bottom: 0.3em;
+  color: #0056b3; /* Consistent with prediction form h3 */
+
+}
+
+label {
+  margin-right: 10px;
+  margin-bottom: 5px;
+  display: inline-block;
+  font-weight: bold;
+  font-size: 0.9em;
+}
+
+select, input[type="text"], button {
+  padding: 10px 15px;
+  margin: 8px 5px;
+  border-radius: 5px;
+  border: 1px solid #ccc;
+  font-size: 1em;
+  transition: all 0.3s ease;
+}
+
+select:focus, input[type="text"]:focus {
+  border-color: #007bff;
+  box-shadow: 0 0 0 0.2rem rgba(0,123,255,.25);
+}
+
+button {
+  cursor: pointer;
+  background-color: #007bff;
+  color: white;
+  border-color: #007bff;
+  font-weight: bold;
+}
+
+button:hover:not(:disabled) { /* Ensure hover only applies to enabled buttons */
+  background-color: #0056b3;
+  border-color: #0056b3;
+}
+
+button:disabled {
+  background-color: #B0C4DE; /* LightSteelBlue */
+  border-color: #A9A9A9; /* DarkGray */
+  color: #696969; /* DimGray */
+  cursor: not-allowed;
+}
+
+hr {
+  border: 0;
+  height: 1px;
+  background: #ddd;
+  margin: 30px 0;
+}
+
+/* Styling for API Key input section */
+.api-key-section {
+  margin: 20px auto;
+  padding: 20px 25px; /* Increased padding */
+  border: 1px solid #ddd;
+  background-color: #fff; 
+  border-radius: 8px;
+  max-width: 600px; 
+  box-shadow: 0 2px 4px rgba(0,0,0,0.08); /* Slightly softer shadow */
+}
+
+.api-key-section label { /* Specific label styling for API key if needed */
+    display: block; /* Make label take full width */
+    margin-bottom: 8px;
+}
+
+.api-key-section input[type="text"] {
+  width: 100%; /* Full width input */
+}
+
+.api-key-section small {
+  color: #dc3545; 
+  display: block;
+  margin-top: 8px; /* Increased margin */
+  font-size: 0.85em;
+}
+
+/* Styling for prediction forms */
+.prediction-form {
+  border: 1px solid #e0e0e0;
+  padding: 25px 30px; /* Increased padding */
+  margin: 25px 0;
+  border-radius: 8px;
+  background-color: #ffffff;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.07); /* Slightly enhanced shadow */
+}
+
+.prediction-form h3 { /* Form titles */
+  margin-top: 0; 
+  color: #0056b3; /* Dark blue for form titles */
+  font-size: 1.4em; /* Slightly larger form titles */
+  border-bottom: 2px solid #007bff; /* Accent border for form titles */
+  padding-bottom: 0.5em;
+}
+
+.prediction-form div { /* Applies to direct div children in the form for spacing */
+  margin-bottom: 15px; 
+}
+.prediction-form hr {
+    margin: 20px 0; /* Reduced margin for hr inside forms */
+}
+
+
+/* Error message styling */
+.error-message {
+  color: #D8000C; 
+  background-color: #FFD2D2; 
+  border: 1px solid #D8000C;
+  padding: 12px 15px; /* Increased padding */
+  margin-top: 15px; /* Increased margin */
+  border-radius: 5px;
+  text-align: left; /* Keep left align for readability */
+  font-size: 0.95em;
+}
+
+/* Loading message styling (placeholder, as it's part of button text) */
+.loading-message {
+  font-style: italic;
+  color: #555;
+}
+
+/* Table styling for visualizers */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  margin-top: 20px; /* Increased margin */
+  font-size: 0.9rem;
+  box-shadow: 0 1px 3px rgba(0,0,0,0.05); /* Softer shadow for tables */
+}
+
+th, td {
+  border: 1px solid #e9ecef; /* Lighter border color for table cells */
+  padding: 12px 15px; /* Increased padding */
+  text-align: center;
+}
+
+th {
+  background-color: #e9ecef; /* Standard Bootstrap table header color */
+  font-weight: bold;
+  color: #495057; /* Darker gray for header text */
+}
+
+tbody tr:nth-child(odd) {
+  background-color: #f8f9fa; /* Slightly off-white for odd rows */
+}
+tbody tr:hover {
+  background-color: #e9ecef; 
+}
+
+/* Specific styling for Visualizer titles */
+div[style*="marginTop: '20px'"] > h4 { /* Targets h4 in Match/SeasonPredictionVisualizer */
+    font-size: 1.2em;
+    color: #333;
+    margin-bottom: 15px;
+}

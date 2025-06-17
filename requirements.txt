@@ -3,5 +3,3 @@ scikit-learn
 numpy
 python-dotenv
 requests
-flask
-flask-cors
